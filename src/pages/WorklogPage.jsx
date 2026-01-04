@@ -20,8 +20,16 @@ const LS_SESSION = "sdwf_worklog_session_v3";
 const LS_WEEKLY_PLAN = "sdwf_weekly_plan_v3";
 const LS_LOGS = "sdwf_worklog_logs_v3";
 const LS_LEAVE_REQUESTS = "sdwf_leave_requests_v2";
+const LS_REFLECTIONS = "sdwf_reflections_v1";
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+const WORK_MOODS = [
+  { key: "🔥", label: "พร้อมลุย" },
+  { key: "🙂", label: "ปกติ" },
+  { key: "😴", label: "พลังต่ำ" },
+  { key: "🤝", label: "ต้องการ support" },
+];
 
 function parseJSON(key, fallback) {
   try {
@@ -125,6 +133,13 @@ function ensureLeaveRequests() {
   return [];
 }
 
+function ensureReflections() {
+  const v = parseJSON(LS_REFLECTIONS, {});
+  if (v && typeof v === "object") return v;
+  setJSON(LS_REFLECTIONS, {});
+  return {};
+}
+
 function Card({ title, children, scroll }) {
   return (
     <div style={card}>
@@ -165,6 +180,11 @@ export default function WorklogPage() {
   const [logs, setLogs] = useState(() => ensureLogsStore());
   const [leaveRequests, setLeaveRequests] = useState(() => ensureLeaveRequests());
 
+  const [reflectionsStore, setReflectionsStore] = useState(() => ensureReflections());
+
+  // Reflection draft (today)
+  const [refDraft, setRefDraft] = useState({ mood: "", text: "" });
+
   const [selectedUser, setSelectedUser] = useState("meen");
   const [passInput, setPassInput] = useState("");
   const [sessionUser, setSessionUser] = useState(() => parseJSON(LS_SESSION, null)?.user || "");
@@ -177,6 +197,12 @@ export default function WorklogPage() {
   const today = todayYMD();
   const todayDow = localDOW(today);
 
+  const miniDays = useMemo(() => {
+    const out = [];
+    for (let i = 13; i >= 0; i--) out.push(addDaysYMD(today, -i));
+    return out;
+  }, [today]);
+
   const thisWeekStart = getWeekStartMonday(today);
   const nextWeekStart = addDaysYMD(thisWeekStart, 7);
 
@@ -185,7 +211,15 @@ export default function WorklogPage() {
   const weekDates = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysYMD(weekStart, i)), [weekStart]);
 
   const planUser = sessionUser || selectedUser;
-  const planKey = makePlanKey(planUser, weekStart);
+
+  // Sync reflection draft from store
+  useEffect(() => {
+    if (!planUser) return;
+    const key = `${planUser}__${today}`;
+    const item = reflectionsStore?.[key];
+    setRefDraft({ mood: item?.mood || "", text: item?.text || "" });
+  }, [planUser, today, reflectionsStore]);
+const planKey = makePlanKey(planUser, weekStart);
 
   const currentPlan = useMemo(() => {
     const p = weeklyPlanStore?.[planKey];
@@ -412,27 +446,84 @@ export default function WorklogPage() {
       <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "340px 1fr", gap: 12, height: "calc(100% - 52px)" }}>
         {/* LEFT column (login smaller + today + leave local) */}
         <div style={{ display: "grid", gridTemplateRows: "auto 1fr 1fr", gap: 12, minHeight: 0 }}>
-          <Card title="Login">
-            <div style={{ display: "grid", gap: 8 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <label style={labSmall}>User</label>
-                <select value={selectedUser} onChange={(e) => setSelectedUser(e.target.value)} style={selSmall}>
-                  {PEOPLE.map((p) => <option key={p} value={p}>{p} ({USER_TYPE[p]})</option>)}
+          <Card title="Reflection (Today)" scroll>
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>
+                owner: <b>{planUser}</b> · date: <b>{today}</b>
+              </div>
+
+              <Field label="Work Mood">
+                <select
+                  value={refDraft.mood}
+                  onChange={(e) => setRefDraft((p) => ({ ...p, mood: e.target.value }))}
+                  style={selSmall}
+                >
+                  <option value="">เลือก mood</option>
+                  {WORK_MOODS.map((m) => (
+                    <option key={m.key} value={m.key}>
+                      {m.key} {m.label}
+                    </option>
+                  ))}
                 </select>
+              </Field>
+
+              <Field label="Reflection (สิ่งที่เรียนรู้วันนี้)">
+                <textarea
+                  value={refDraft.text}
+                  onChange={(e) => setRefDraft((p) => ({ ...p, text: e.target.value }))}
+                  rows={4}
+                  style={{ ...inpSmall, height: "auto" }}
+                  placeholder="เขียนสั้น ๆ ให้ตัวเอง เช่น วันนี้เรียนรู้อะไร / อะไรที่ทำได้ดี / อะไรที่อยากปรับ"
+                />
+              </Field>
+
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => {
+                    if (!planUser) return alert("ยังไม่มี owner");
+                    const key = `${planUser}__${today}`;
+                    const next = { ...(reflectionsStore || {}) };
+                    next[key] = { user: planUser, date: today, mood: refDraft.mood || "", text: refDraft.text || "", saved_at: nowISO() };
+                    setReflectionsStore(next);
+                    alert("Saved ✅");
+                  }}
+                  style={btnXs}
+                >
+                  Save
+                </button>
               </div>
 
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <label style={labSmall}>Pass</label>
-                <input value={passInput} onChange={(e) => setPassInput(e.target.value)} type="password" style={inpSmall} placeholder="1234" />
-              </div>
+              <div style={{ borderTop: "1px solid #2b2b2b", paddingTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>Mini calendar (last 14 days)</div>
 
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button onClick={unlock} style={btnXs}>Unlock</button>
-                <button onClick={setOrChangePasscode} style={btnXs}>Set</button>
-                {sessionUser && <button onClick={logout} style={btnXs}>Logout</button>}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+                  {miniDays.map((d) => {
+                    const k = `${planUser}__${d}`;
+                    const item = reflectionsStore?.[k];
+                    const mood = item?.mood || "";
+                    const bg = mood ? "rgba(56,189,248,0.15)" : "transparent";
+                    return (
+                      <div
+                        key={d}
+                        title={item ? `${d}\n${item.mood || ""}\n${(item.text || "").slice(0, 80)}` : d}
+                        style={{
+                          border: "1px solid #2b2b2b",
+                          borderRadius: 10,
+                          padding: "6px 6px",
+                          minHeight: 44,
+                          background: bg,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4,
+                        }}
+                      >
+                        <div style={{ fontSize: 11, opacity: 0.75 }}>{d.slice(8, 10)}/{d.slice(5, 7)}</div>
+                        <div style={{ fontSize: 14, lineHeight: 1 }}>{mood || "·"}</div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-
-              <div style={{ fontSize: 11, opacity: 0.7 }}>* default passcode = <b>1234</b></div>
             </div>
           </Card>
 
