@@ -199,7 +199,8 @@ export default function WorklogPage() {
 
   const miniDays = useMemo(() => {
     const out = [];
-    for (let i = 13; i >= 0; i--) out.push(addDaysYMD(today, -i));
+    // last 7 days (day 7 = today)
+    for (let i = 6; i >= 0; i--) out.push(addDaysYMD(today, -i));
     return out;
   }, [today]);
 
@@ -356,7 +357,7 @@ const planKey = makePlanKey(planUser, weekStart);
     if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
     const row = ensureTodayRow();
     if (!row) return;
-    if (row.clock_in) return alert("วันนี้ clock in แล้ว");
+    if (!row.clock_in) return alert("วันนี้ clock in แล้ว");
     const next = logs.map((l) => (l.id === row.id ? { ...l, clock_in: nowISO() } : l));
     setLogs(next);
   }
@@ -364,7 +365,7 @@ const planKey = makePlanKey(planUser, weekStart);
     if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
     const row = ensureTodayRow();
     if (!row) return;
-    if (!row.clock_in) return alert("ต้อง clock in ก่อน");
+    if (row.clock_in) return alert("ต้อง clock in ก่อน");
     if (row.clock_out) return alert("วันนี้ clock out แล้ว");
     const next = logs.map((l) => (l.id === row.id ? { ...l, clock_out: nowISO() } : l));
     setLogs(next);
@@ -447,7 +448,7 @@ const planKey = makePlanKey(planUser, weekStart);
         {/* LEFT column (login smaller + today + leave local) */}
         <div style={{ display: "grid", gridTemplateRows: "auto 1fr 1fr", gap: 12, minHeight: 0 }}>
           <Card title="Reflection (Today)" scroll>
-            <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "grid", gap: 2 }}>
               <div style={{ fontSize: 12, opacity: 0.85 }}>
                 owner: <b>{planUser}</b> · date: <b>{today}</b>
               </div>
@@ -467,13 +468,13 @@ const planKey = makePlanKey(planUser, weekStart);
                 </select>
               </Field>
 
-              <Field label="Reflection (สิ่งที่เรียนรู้วันนี้)">
+              <Field label="Reflection">
                 <textarea
                   value={refDraft.text}
                   onChange={(e) => setRefDraft((p) => ({ ...p, text: e.target.value }))}
-                  rows={4}
+                  rows={2}
                   style={{ ...inpSmall, height: "auto" }}
-                  placeholder="เขียนสั้น ๆ ให้ตัวเอง เช่น วันนี้เรียนรู้อะไร / อะไรที่ทำได้ดี / อะไรที่อยากปรับ"
+                  placeholder="วันนี้เรียนรู้อะไรเกี่ยวกับการทำงานบ้าง? / อะไรที่ทำได้ดี / อะไรที่อยากปรับ"
                 />
               </Field>
 
@@ -494,9 +495,9 @@ const planKey = makePlanKey(planUser, weekStart);
               </div>
 
               <div style={{ borderTop: "1px solid #2b2b2b", paddingTop: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>Mini calendar (last 14 days)</div>
+                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>Mini calendar (last 7 days)</div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
                   {miniDays.map((d) => {
                     const k = `${planUser}__${d}`;
                     const item = reflectionsStore?.[k];
@@ -510,15 +511,15 @@ const planKey = makePlanKey(planUser, weekStart);
                           border: "1px solid #2b2b2b",
                           borderRadius: 10,
                           padding: "6px 6px",
-                          minHeight: 44,
+                          minHeight: 40,
                           background: bg,
                           display: "flex",
                           flexDirection: "column",
-                          gap: 4,
+                          gap: 3,
                         }}
                       >
-                        <div style={{ fontSize: 11, opacity: 0.75 }}>{d.slice(8, 10)}/{d.slice(5, 7)}</div>
-                        <div style={{ fontSize: 14, lineHeight: 1 }}>{mood || "·"}</div>
+                        <div style={{ fontSize: 10, opacity: 0.75 }}>{d.slice(8, 10)}/{d.slice(5, 7)}</div>
+                        <div style={{ fontSize: 10, lineHeight: 1 }}>{mood || "·"}</div>
                       </div>
                     );
                   })}
@@ -543,7 +544,7 @@ const planKey = makePlanKey(planUser, weekStart);
             </div>
           </Card>
 
-          <Card title="Leave requests (local)" scroll>
+          <Card title="Leave requests" scroll>
             {leaveRequests.filter((r) => r.user === (sessionUser || selectedUser)).length === 0 ? (
               <div style={{ fontSize: 12, opacity: 0.7 }}>ยังไม่มีคำขอ</div>
             ) : (
@@ -552,7 +553,7 @@ const planKey = makePlanKey(planUser, weekStart);
                   .filter((r) => r.user === (sessionUser || selectedUser))
                   .slice(0, 20)
                   .map((r) => (
-                    <div key={r.id} style={{ border: "1px solid #2b2b2b", borderRadius: 10, padding: 10 }}>
+                    <div key={r.id} style={{ border: "1px solid #2b2b2b", borderRadius: 10, padding: 8 }}>
                       <div style={{ fontWeight: 700, fontSize: 12 }}>{r.type} · {r.status}</div>
                       <div style={{ fontSize: 12, opacity: 0.8 }}>
                         {r.from_date} {r.from_time} → {r.to_date} {r.to_time}
@@ -569,8 +570,8 @@ const planKey = makePlanKey(planUser, weekStart);
         <div style={{ display: "grid", gridTemplateRows: "auto 1fr", gap: 12, minHeight: 0 }}>
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12 }}>
             <Card title="Weekly plan">
-              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>{banner}</div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 3 }}>{banner}</div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                 <button onClick={() => setPlanMode("this")} style={planMode === "this" ? btnActive : btnXs}>This week</button>
                 <button onClick={() => setPlanMode("next")} style={planMode === "next" ? btnActive : btnXs}>Next week</button>
 
@@ -604,8 +605,8 @@ const planKey = makePlanKey(planUser, weekStart);
 <th style={{ ...thXs, width: "6.5%" }}>type</th>
 
 {/* start / end ต้องเห็นเลขชัด */}
-<th style={{ ...thXs, width: "7.2%" }}>start</th>
-<th style={{ ...thXs, width: "7.2%" }}>end</th>
+<th style={{ ...thXs, width: "7.5%" }}>start</th>
+<th style={{ ...thXs, width: "7.5%" }}>end</th>
 
 <th style={{ ...thXs, width: "3.5%" }}>hrs</th>
 
