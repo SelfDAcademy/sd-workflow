@@ -8,6 +8,10 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
+  const [fpOpen, setFpOpen] = useState(false);
+  const [fpEmail, setFpEmail] = useState("");
+  const [fpLoading, setFpLoading] = useState(false);
+  const [fpMsg, setFpMsg] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -25,6 +29,35 @@ export default function LoginPage() {
       nav("/tasks", { replace: true });
     } catch (e2) {
       setErr(e2?.message || "Login failed");
+    }
+  }
+
+
+  async function sendResetLink() {
+    if (!supabase) return;
+    setErr("");
+    setFpMsg("");
+    const targetEmail = (fpEmail || email || "").trim();
+    if (!targetEmail) {
+      setFpMsg("กรุณาใส่อีเมล");
+      return;
+    }
+    try {
+      setFpLoading(true);
+      const { error } = await supabase.auth.resetPasswordForEmail(targetEmail, {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      setFpLoading(false);
+      if (error) {
+        setFpMsg(error.message || "ส่งลิงก์ไม่สำเร็จ");
+        return;
+      }
+      setFpMsg("ส่งลิงก์ตั้งรหัสผ่านไปที่อีเมลแล้ว");
+      setFpOpen(false);
+      setFpEmail("");
+    } catch (e2) {
+      setFpLoading(false);
+      setFpMsg(e2?.message || "ส่งลิงก์ไม่สำเร็จ");
     }
   }
 
@@ -68,6 +101,69 @@ export default function LoginPage() {
           >
             Sign in
           </button>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+            <button
+              type="button"
+              onClick={() => {
+                setFpMsg("");
+                setFpEmail(email || "");
+                setFpOpen((v) => !v);
+              }}
+              disabled={!supabase}
+              style={{
+                background: "transparent",
+                border: 0,
+                padding: 0,
+                color: "#93c5fd",
+                cursor: supabase ? "pointer" : "not-allowed",
+                fontSize: 12,
+                textDecoration: "underline",
+                opacity: supabase ? 1 : 0.6,
+              }}
+            >
+              Forgot password?
+            </button>
+            <div style={{ fontSize: 12, opacity: 0.6 }}>Invite → ตั้งรหัสผ่านครั้งแรก</div>
+          </div>
+
+          {fpOpen && (
+            <div style={{ border: "1px solid #2b2b2b", borderRadius: 12, padding: 12, marginTop: 10, background: "#0f1418" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>Reset password</div>
+              <input
+                value={fpEmail}
+                onChange={(e) => setFpEmail(e.target.value)}
+                placeholder="Email"
+                style={{ padding: 10, borderRadius: 10, width: "100%" }}
+              />
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFpOpen(false);
+                    setFpMsg("");
+                  }}
+                  style={{ padding: "8px 10px", borderRadius: 10, cursor: "pointer" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={sendResetLink}
+                  disabled={!supabase || fpLoading}
+                  style={{
+                    padding: "8px 10px",
+                    borderRadius: 10,
+                    cursor: !supabase || fpLoading ? "not-allowed" : "pointer",
+                    opacity: !supabase || fpLoading ? 0.6 : 1,
+                  }}
+                >
+                  {fpLoading ? "Sending..." : "Send link"}
+                </button>
+              </div>
+              {fpMsg && <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>{fpMsg}</div>}
+            </div>
+          )}
 
           {!supabase && (
             <div style={{ fontSize: 12, opacity: 0.7 }}>
