@@ -294,6 +294,9 @@ export default function WorklogPage() {
 
       if (!email || !userKey) return;
 
+      // Auto-clear legacy passcode session to prevent stale user identity overriding Supabase auth
+      try { localStorage.removeItem(LS_SESSION); } catch {}
+
       setAuthEmail(email);
       setAuthUserKey(userKey);
       setAuthRole(role);
