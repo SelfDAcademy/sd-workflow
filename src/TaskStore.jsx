@@ -128,6 +128,18 @@ export function TaskProvider({ children }) {
 
   const supaEnabled = Boolean(supabase);
 
+// Ensure requests that need RLS-protected writes are authenticated (have a Supabase session).
+async function ensureAuthenticated() {
+  if (!supaEnabled) return { ok: false, session: null };
+  const { data, error } = await supabase.auth.getSession();
+  const session = data?.session || null;
+  if (error || !session) {
+    alert("ต้อง Login ด้วยอีเมลก่อน จึงจะสร้าง/แก้ไข Projects และ Tasks ได้");
+    return { ok: false, session: null };
+  }
+  return { ok: true, session };
+}
+
   useEffect(() => {
     if (!supaEnabled) return;
 
@@ -165,6 +177,8 @@ export function TaskProvider({ children }) {
       setTasks((prev) => [newTask, ...prev]);
       return;
     }
+    const auth = await ensureAuthenticated();
+    if (!auth.ok) return;
     const { error } = await supabase.from("tasks").insert([newTask]);
     if (error) alert(error.message);
   }
@@ -174,6 +188,8 @@ export function TaskProvider({ children }) {
       setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
       return;
     }
+    const auth = await ensureAuthenticated();
+    if (!auth.ok) return;
     const { error } = await supabase.from("tasks").update(patch).eq("id", id);
     if (error) alert(error.message);
   }
