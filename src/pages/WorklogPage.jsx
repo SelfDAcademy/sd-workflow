@@ -27,6 +27,7 @@ const LS_REMARKS = "sdwf_remarks_v1";
 // Supabase email -> company user mapping (override as needed)
 const EMAIL_TO_USER = {
   "akiraeoe@gmail.com": "fah",
+  "softskill1998@gmail.com": "pluem"
 };
 
 // Roles
