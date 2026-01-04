@@ -8,6 +8,7 @@ import LoginPage from "./pages/LoginPage";
 
 import RequireAuth from "./auth/RequireAuth";
 import { TaskProvider } from "./TaskStore";
+import ResetPassword from "./pages/ResetPassword";
 
 function App() {
   return (
@@ -17,6 +18,7 @@ function App() {
 
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
 
           <Route
             path="/*"
