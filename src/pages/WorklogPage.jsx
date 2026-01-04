@@ -21,6 +21,16 @@ const LS_WEEKLY_PLAN = "sdwf_weekly_plan_v3";
 const LS_LOGS = "sdwf_worklog_logs_v3";
 const LS_LEAVE_REQUESTS = "sdwf_leave_requests_v2";
 const LS_REFLECTIONS = "sdwf_reflections_v1";
+const LS_TIME_CHANGES = "sdwf_time_changes_v1";
+const LS_REMARKS = "sdwf_remarks_v1";
+
+// Supabase email -> company user mapping (override as needed)
+const EMAIL_TO_USER = {
+  "akiraeoe@gmail.com": "fah",
+};
+
+// Roles
+const SUPERVISORS = new Set(["fah", "pluem", "namtip"]);
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -147,6 +157,46 @@ function ensureReflections() {
   return {};
 }
 
+
+function inferUserFromEmail(email) {
+  if (!email) return "";
+  const lower = String(email).toLowerCase().trim();
+  // explicit mapping first
+  if (EMAIL_TO_USER[lower]) return EMAIL_TO_USER[lower];
+  // heuristic: if local-part matches a PEOPLE key
+  const local = lower.split("@")[0] || "";
+  if (PEOPLE.includes(local)) return local;
+  return "";
+}
+function getRole(userKey) {
+  return userKey && SUPERVISORS.has(userKey) ? "supervisor" : "team";
+}
+
+// Optional: detect Supabase auth from a global client (won't break if absent)
+async function tryGetSupabaseEmail() {
+  try {
+    const sb = globalThis?.supabase;
+    if (!sb?.auth) return "";
+    // v2: getSession()
+    if (typeof sb.auth.getSession === "function") {
+      const { data, error } = await sb.auth.getSession();
+      if (error) return "";
+      const email = data?.session?.user?.email || "";
+      return email || "";
+    }
+    // fallback: getUser()
+    if (typeof sb.auth.getUser === "function") {
+      const { data, error } = await sb.auth.getUser();
+      if (error) return "";
+      const email = data?.user?.email || "";
+      return email || "";
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
 function Card({ title, children, scroll }) {
   return (
     <div style={card}>
@@ -200,10 +250,47 @@ export default function WorklogPage() {
   const [passInput, setPassInput] = useState("");
   const [sessionUser, setSessionUser] = useState(() => parseJSON(LS_SESSION, null)?.user || "");
 
+  // Supabase auth (optional): map email -> userKey
+  const [authEmail, setAuthEmail] = useState("");
+  const [authUserKey, setAuthUserKey] = useState("");
+  const [authRole, setAuthRole] = useState("");
+
+  // Viewer (right-top dropdown): can view anyone, edit only self (per permissions)
+  const [viewUser, setViewUser] = useState("");
+
+  const actingUser = authUserKey || sessionUser || "";
+  const actingRole = authRole || (actingUser ? getRole(actingUser) : "");
+  const canEditSelf = Boolean(actingUser && viewUser && actingUser === viewUser);
+
   useEffect(() => setJSON(LS_PASSCODES, passcodes), [passcodes]);
   useEffect(() => setJSON(LS_WEEKLY_PLAN, weeklyPlanStore), [weeklyPlanStore]);
   useEffect(() => setJSON(LS_LOGS, logs), [logs]);
   useEffect(() => setJSON(LS_LEAVE_REQUESTS, leaveRequests), [leaveRequests]);
+
+  // Auth bootstrap: if Supabase session exists, auto-map email -> userKey and set as acting user.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const email = await tryGetSupabaseEmail();
+      if (!alive) return;
+      if (!email) return;
+      const userKey = inferUserFromEmail(email);
+      if (!userKey) return;
+      setAuthEmail(email);
+      setAuthUserKey(userKey);
+      setAuthRole(getRole(userKey));
+      // keep local session in sync (so old flows still work)
+      setSessionUser(userKey);
+      setJSON(LS_SESSION, { user: userKey, at: nowISO() });
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // Ensure viewer defaults to acting user
+  useEffect(() => {
+    if (!actingUser) return;
+    setViewUser((prev) => (prev ? prev : actingUser));
+  }, [actingUser]);
 
   const today = todayYMD();
   const todayDow = localDOW(today);
@@ -222,7 +309,7 @@ export default function WorklogPage() {
   const weekStart = planMode === "next" ? nextWeekStart : thisWeekStart;
   const weekDates = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysYMD(weekStart, i)), [weekStart]);
 
-  const planUser = sessionUser || selectedUser;
+  const planUser = viewUser || actingUser || selectedUser;
 
   // Sync reflection draft from store
   useEffect(() => {
@@ -246,18 +333,20 @@ const planKey = makePlanKey(planUser, weekStart);
 
   const canEditNextWeek = isFridayPlanningWindowNow();
   const canEditPlan = useMemo(() => {
-    if (!sessionUser) return false;
+    // permissions: edit only self (team can only self; supervisor also only self in worklog)
+    if (!actingUser) return false;
+    if (!canEditSelf) return false;
     if (draftPlan.locked) return false;
     if (planMode === "this") return true;
     return canEditNextWeek;
-  }, [sessionUser, draftPlan.locked, planMode, canEditNextWeek]);
+  }, [actingUser, canEditSelf, draftPlan.locked, planMode, canEditNextWeek]);
 
   const banner = useMemo(() => {
-    if (!sessionUser || planMode !== "next") return "";
+    if (!actingUser || planMode !== "next") return "";
     if (draftPlan.locked) return "✅ สัปดาห์หน้าถูกยืนยันแล้ว";
     if (canEditNextWeek) return "⚠️ เปิดให้ลงสัปดาห์หน้าเฉพาะศุกร์ 12:00–23:59 (Save แล้วล็อก)";
     return "🔒 สัปดาห์หน้ายังแก้ไม่ได้";
-  }, [sessionUser, planMode, canEditNextWeek, draftPlan.locked]);
+  }, [actingUser, planMode, canEditNextWeek, draftPlan.locked]);
 
   const totalWeekMinutes = useMemo(() => {
     const days = draftPlan.days || {};
@@ -269,33 +358,33 @@ const planKey = makePlanKey(planUser, weekStart);
     return sum;
   }, [draftPlan, weekDates, planUser]);
 
-  const reqWeekMin = useMemo(() => (sessionUser ? requirementWeekMinutes(sessionUser) : 0), [sessionUser]);
+  const reqWeekMin = useMemo(() => (planUser ? requirementWeekMinutes(planUser) : 0), [planUser]);
   const totalHoursLabel = `${Math.round((totalWeekMinutes / 60) * 10) / 10} / ${reqWeekMin / 60} hrs`;
 
   const todayPlan = useMemo(() => {
-    if (!sessionUser) return null;
-    const key = makePlanKey(sessionUser, getWeekStartMonday(today));
+    if (!planUser) return null;
+    const key = makePlanKey(planUser, getWeekStartMonday(today));
     return weeklyPlanStore?.[key]?.days?.[today] || null;
-  }, [weeklyPlanStore, sessionUser, today]);
+  }, [weeklyPlanStore, planUser, today]);
 
   const todayLog = useMemo(() => {
-    if (!sessionUser) return null;
-    return logs.find((l) => l.user === sessionUser && l.date === today) || null;
-  }, [logs, sessionUser, today]);
+    if (!planUser) return null;
+    return logs.find((l) => l.user === planUser && l.date === today) || null;
+  }, [logs, planUser, today]);
 
   const stats30 = useMemo(() => {
-    if (!sessionUser) return { late: 0, missedOut: 0, absent: 0 };
+    if (!planUser) return { late: 0, missedOut: 0, absent: 0 };
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 30);
     let late = 0, missedOut = 0, absent = 0;
 
     for (const l of logs) {
-      if (l.user !== sessionUser) continue;
+      if (l.user !== planUser) continue;
       const d = new Date(`${l.date}T00:00:00`);
       if (d < cutoff) continue;
 
       const week = getWeekStartMonday(l.date);
-      const pk = makePlanKey(sessionUser, week);
+      const pk = makePlanKey(planUser, week);
       const dayPlan = weeklyPlanStore?.[pk]?.days?.[l.date];
 
       if (dayPlan?.type === "work") {
@@ -312,15 +401,15 @@ const planKey = makePlanKey(planUser, weekStart);
       }
     }
     return { late, missedOut, absent };
-  }, [sessionUser, logs, weeklyPlanStore]);
+  }, [planUser, logs, weeklyPlanStore]);
 
   const [manageOpen, setManageOpen] = useState(false);
   const [manageDay, setManageDay] = useState("");
 
   const ongoingTasks = useMemo(() => {
-    if (!sessionUser) return [];
-    return tasks.filter((t) => (t.doer === sessionUser || t.support === sessionUser) && t.status !== "done");
-  }, [tasks, sessionUser]);
+    if (!planUser) return [];
+    return tasks.filter((t) => (t.doer === planUser || t.support === planUser) && t.status !== "done");
+  }, [tasks, planUser]);
 
   const [sickOpen, setSickOpen] = useState(false);
   const [sickForm, setSickForm] = useState({ from_date: today, from_time: "09:00", to_date: today, to_time: "18:00", reason: "" });
@@ -340,11 +429,16 @@ const planKey = makePlanKey(planUser, weekStart);
     if (!correct) return alert("ยังไม่มี passcode");
     if (passInput !== correct) return alert("รหัสผ่านไม่ถูกต้อง");
     setSessionUser(selectedUser);
+    setViewUser(selectedUser);
     setJSON(LS_SESSION, { user: selectedUser, at: nowISO() });
     setPassInput("");
   }
   function logout() {
     setSessionUser("");
+    setAuthEmail("");
+    setAuthUserKey("");
+    setAuthRole("");
+    setViewUser("");
     setJSON(LS_SESSION, { user: "", at: nowISO() });
   }
   function setOrChangePasscode() {
@@ -356,16 +450,17 @@ const planKey = makePlanKey(planUser, weekStart);
   }
 
   function ensureTodayRow() {
-    if (!sessionUser) return null;
-    const existing = logs.find((l) => l.user === sessionUser && l.date === today);
+    if (!actingUser) return null;
+    const existing = logs.find((l) => l.user === actingUser && l.date === today);
     if (existing) return existing;
-    const row = { id: safeId(), user: sessionUser, date: today, clock_in: "", clock_out: "" };
+    const row = { id: safeId(), user: actingUser, date: today, clock_in: "", clock_out: "" };
     const next = [row, ...logs];
     setLogs(next);
     return row;
   }
   function clockIn() {
-    if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+    if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
+    if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     const row = ensureTodayRow();
     if (!row) return;
     if (row.clock_in) return alert("วันนี้ clock in แล้ว");
@@ -373,7 +468,8 @@ const planKey = makePlanKey(planUser, weekStart);
     setLogs(next);
   }
   function clockOut() {
-    if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+    if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
+    if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     const row = ensureTodayRow();
     if (!row) return;
     if (!row.clock_in) return alert("ต้อง clock in ก่อน");
@@ -383,9 +479,10 @@ const planKey = makePlanKey(planUser, weekStart);
   }
 
   function savePlan() {
-    if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+    if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
+    if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     if (!canEditPlan) return alert("ตอนนี้แก้ไขไม่ได้");
-    if (USER_TYPE[sessionUser] === "full_time" && totalWeekMinutes < 40 * 60) {
+    if (USER_TYPE[planUser] === "full_time" && totalWeekMinutes < 40 * 60) {
       return alert(`ชั่วโมงทั้งสัปดาห์ยังไม่ถึง 40 ชั่วโมง (ตอนนี้ ${Math.round((totalWeekMinutes / 60) * 10) / 10} ชม.)`);
     }
     const store = { ...(weeklyPlanStore || {}) };
@@ -396,7 +493,7 @@ const planKey = makePlanKey(planUser, weekStart);
   }
 
   function openManageTasks(ymd) {
-    if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+    if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     setManageDay(ymd);
     setManageOpen(true);
   }
@@ -417,18 +514,19 @@ const planKey = makePlanKey(planUser, weekStart);
   }
 
   function submitBusinessLeave() {
-    if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+    if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
+    if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     if (!leaveForm.reason.trim()) return alert("กรุณาใส่เหตุผลลากิจ");
     const from = new Date(`${leaveForm.from_date}T00:00:00`);
     const now = new Date(`${today}T00:00:00`);
     const diffDays = Math.floor((from.getTime() - now.getTime()) / 86400000);
     if (diffDays < 3) return alert("ลากิจต้องล่วงหน้าอย่างน้อย 3 วัน");
 
-    const req = { id: safeId(), user: sessionUser, type: "leave", status: "pending", created_at: nowISO(), requested_for_day: leaveTargetDay, ...leaveForm, notify_to: "fah" };
+    const req = { id: safeId(), user: actingUser, type: "leave", status: "pending", created_at: nowISO(), requested_for_day: leaveTargetDay, ...leaveForm, notify_to: "fah" };
     setLeaveRequests((prev) => [req, ...prev]);
 
     const next = JSON.parse(JSON.stringify(draftPlan));
-    next.days[leaveTargetDay] = { ...(next.days[leaveTargetDay] || defaultDay(sessionUser, leaveTargetDay)), type: "leave", leave_req_id: req.id, note: "pending", start: "", end: "" };
+    next.days[leaveTargetDay] = { ...(next.days[leaveTargetDay] || defaultDay(actingUser, leaveTargetDay)), type: "leave", leave_req_id: req.id, note: "pending", start: "", end: "" };
     setDraftPlan(next);
 
     setLeaveOpen(false);
@@ -436,9 +534,10 @@ const planKey = makePlanKey(planUser, weekStart);
   }
 
   function submitSickLeave() {
-    if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+    if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
+    if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     if (!sickForm.reason.trim()) return alert("กรุณาใส่เหตุผล/อาการป่วย");
-    const req = { id: safeId(), user: sessionUser, type: "sick", status: "logged", created_at: nowISO(), ...sickForm, notify_to: "fah" };
+    const req = { id: safeId(), user: actingUser, type: "sick", status: "logged", created_at: nowISO(), ...sickForm, notify_to: "fah" };
     setLeaveRequests((prev) => [req, ...prev]);
     setSickOpen(false);
     alert("บันทึกลาป่วยแล้ว");
@@ -450,8 +549,31 @@ const planKey = makePlanKey(planUser, weekStart);
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h2 style={{ margin: 0 }}>Worklog</h2>
         <div style={{ opacity: 0.7, fontSize: 12 }}>Clock + Weekly Plan</div>
-        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>
-          Session: <b>{sessionUser || "-"}</b>
+        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85, display: "flex", alignItems: "center", gap: 10 }}>
+          <div>
+            Login: <b>{actingUser || "-"}</b>
+            {actingRole ? <span style={{ opacity: 0.8 }}> · {actingRole}</span> : null}
+            {authEmail ? <span style={{ opacity: 0.7 }}> · {authEmail}</span> : null}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ opacity: 0.8 }}>View</span>
+            <select
+              value={viewUser || ""}
+              onChange={(e) => setViewUser(e.target.value)}
+              disabled={!actingUser}
+              style={{ ...selXs, width: 140 }}
+            >
+              <option value="" disabled>
+                -
+              </option>
+              {PEOPLE.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -553,20 +675,20 @@ const planKey = makePlanKey(planUser, weekStart);
               <div style={{ fontSize: 12, opacity: 0.85 }}>clock out: <b>{todayLog?.clock_out ? timeFromISO(todayLog.clock_out) : "-"}</b></div>
 
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button onClick={clockIn} style={btnXs}>In</button>
-                <button onClick={clockOut} style={btnXs}>Out</button>
-                <button onClick={() => setSickOpen(true)} style={btnWarnXs}>Sick</button>
+                <button onClick={clockIn} style={btnXs} disabled={!canEditSelf}>In</button>
+                <button onClick={clockOut} style={btnXs} disabled={!canEditSelf}>Out</button>
+                <button onClick={() => setSickOpen(true)} style={btnWarnXs} disabled={!canEditSelf}>Sick</button>
               </div>
             </div>
           </Card>
 
           <Card title="Leave requests" scroll>
-            {leaveRequests.filter((r) => r.user === (sessionUser || selectedUser)).length === 0 ? (
+            {leaveRequests.filter((r) => r.user === planUser).length === 0 ? (
               <div style={{ fontSize: 12, opacity: 0.7 }}>ยังไม่มีคำขอ</div>
             ) : (
               <div style={{ display: "grid", gap: 8 }}>
                 {leaveRequests
-                  .filter((r) => r.user === (sessionUser || selectedUser))
+                  .filter((r) => r.user === planUser)
                   .slice(0, 20)
                   .map((r) => (
                     <div key={r.id} style={{ border: "1px solid #2b2b2b", borderRadius: 10, padding: 8 }}>
@@ -716,7 +838,7 @@ const planKey = makePlanKey(planUser, weekStart);
                         </td>
 
                         <td style={tdXs}>
-                          <button style={btnXs} disabled={!sessionUser} onClick={() => { setManageDay(d); setManageOpen(true); }}>
+                          <button style={btnXs} disabled={!canEditSelf} onClick={() => { setManageDay(d); setManageOpen(true); }}>
                             manage
                           </button>
                         </td>
@@ -786,7 +908,7 @@ const planKey = makePlanKey(planUser, weekStart);
       )}
 
       {/* Manage tasks modal */}
-      {manageOpen && sessionUser && (
+      {manageOpen && canEditSelf && (
         <Modal title={`Manage tasks for ${manageDay} (${localDOW(manageDay)})`} onClose={() => setManageOpen(false)}>
           <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>เลือกงาน ongoing แล้วผูกลงวันนั้น</div>
           {ongoingTasks.length === 0 ? (
@@ -815,7 +937,7 @@ const planKey = makePlanKey(planUser, weekStart);
       )}
 
       {/* Sick leave modal */}
-      {sickOpen && sessionUser && (
+      {sickOpen && canEditSelf && (
         <Modal title="Sick leave" onClose={() => setSickOpen(false)}>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -830,9 +952,9 @@ const planKey = makePlanKey(planUser, weekStart);
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button onClick={() => setSickOpen(false)} style={btnSm}>Cancel</button>
               <button onClick={() => {
-                if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
+                if (!actingUser) return alert("ต้องปลดล็อกก่อน");
                 if (!sickForm.reason.trim()) return alert("กรุณาใส่เหตุผล/อาการป่วย");
-                const req = { id: safeId(), user: sessionUser, type: "sick", status: "logged", created_at: nowISO(), ...sickForm, notify_to: "fah" };
+                const req = { id: safeId(), user: actingUser, type: "sick", status: "logged", created_at: nowISO(), ...sickForm, notify_to: "fah" };
                 setLeaveRequests((prev) => [req, ...prev]);
                 setSickOpen(false);
               }} style={btnWarnSm}>Submit</button>
@@ -842,7 +964,7 @@ const planKey = makePlanKey(planUser, weekStart);
       )}
 
       {/* Leave request modal */}
-      {leaveOpen && sessionUser && (
+      {leaveOpen && canEditSelf && (
         <Modal title={`Leave request (for ${leaveTargetDay})`} onClose={() => setLeaveOpen(false)}>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
