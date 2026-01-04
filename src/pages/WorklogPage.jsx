@@ -48,7 +48,11 @@ function nowISO() {
   return new Date().toISOString();
 }
 function todayYMD() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
 }
 function localDOW(ymd) {
   return DOW[new Date(`${ymd}T00:00:00`).getDay()];
@@ -63,7 +67,10 @@ function getWeekStartMonday(ymd) {
 function addDaysYMD(ymd, days) {
   const d = new Date(`${ymd}T00:00:00`);
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
 }
 function minutesBetween(startHHMM, endHHMM) {
   if (!startHHMM || !endHHMM) return 0;
@@ -184,6 +191,10 @@ export default function WorklogPage() {
 
   // Reflection draft (today)
   const [refDraft, setRefDraft] = useState({ mood: "", text: "" });
+
+  // Reflection viewer (mini calendar click)
+  const [refViewDay, setRefViewDay] = useState("");
+  const [refViewOpen, setRefViewOpen] = useState(false);
 
   const [selectedUser, setSelectedUser] = useState("meen");
   const [passInput, setPassInput] = useState("");
@@ -357,7 +368,7 @@ const planKey = makePlanKey(planUser, weekStart);
     if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
     const row = ensureTodayRow();
     if (!row) return;
-    if (!row.clock_in) return alert("วันนี้ clock in แล้ว");
+    if (row.clock_in) return alert("วันนี้ clock in แล้ว");
     const next = logs.map((l) => (l.id === row.id ? { ...l, clock_in: nowISO() } : l));
     setLogs(next);
   }
@@ -495,7 +506,7 @@ const planKey = makePlanKey(planUser, weekStart);
               </div>
 
               <div style={{ borderTop: "1px solid #2b2b2b", paddingTop: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>Mini calendar (last 7 days)</div>
+                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>Mini calendar (last 14 days)</div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
                   {miniDays.map((d) => {
@@ -506,10 +517,15 @@ const planKey = makePlanKey(planUser, weekStart);
                     return (
                       <div
                         key={d}
+                        onClick={() => {
+                          setRefViewDay(d);
+                          setRefViewOpen(true);
+                        }}
                         title={item ? `${d}\n${item.mood || ""}\n${(item.text || "").slice(0, 80)}` : d}
                         style={{
                           border: "1px solid #2b2b2b",
                           borderRadius: 10,
+                          cursor: "pointer",
                           padding: "6px 6px",
                           minHeight: 40,
                           background: bg,
@@ -727,6 +743,47 @@ const planKey = makePlanKey(planUser, weekStart);
           </Card>
         </div>
       </div>
+
+
+      {/* Reflection detail popup (from mini calendar) */}
+      {refViewOpen && (
+        <Modal
+          title={`Reflection: ${refViewDay} (${localDOW(refViewDay)})`}
+          onClose={() => setRefViewOpen(false)}
+        >
+          {(() => {
+            const key = `${planUser}__${refViewDay}`;
+            const item = reflectionsStore?.[key];
+            if (!item) {
+              return <div style={{ fontSize: 12, opacity: 0.8 }}>ยังไม่มี reflection ของวันนี้</div>;
+            }
+            const moodLabel = WORK_MOODS.find((m) => m.key === item.mood)?.label || "";
+            return (
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>
+                  mood: <b>{item.mood}</b> {moodLabel ? `(${moodLabel})` : ""}
+                </div>
+                <div
+                  style={{
+                    border: "1px solid #2b2b2b",
+                    borderRadius: 12,
+                    padding: 10,
+                    background: "#141a1f",
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                    lineHeight: 1.35,
+                  }}
+                >
+                  {item.text || "-"}
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  saved: {item.saved_at ? timeFromISO(item.saved_at) : "-"}
+                </div>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
 
       {/* Manage tasks modal */}
       {manageOpen && sessionUser && (
