@@ -280,6 +280,7 @@ export default function WorklogPage() {
   useEffect(() => setJSON(LS_WEEKLY_PLAN, weeklyPlanStore), [weeklyPlanStore]);
   useEffect(() => setJSON(LS_LOGS, logs), [logs]);
   useEffect(() => setJSON(LS_LEAVE_REQUESTS, leaveRequests), [leaveRequests]);
+  useEffect(() => setJSON(LS_REFLECTIONS, reflectionsStore), [reflectionsStore]);
 
   // Auth bootstrap: if Supabase session exists, load profile (username/role) from DB and use as acting user.
   useEffect(() => {
