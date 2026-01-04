@@ -376,7 +376,7 @@ const planKey = makePlanKey(planUser, weekStart);
     if (!sessionUser) return alert("ต้องปลดล็อกก่อน");
     const row = ensureTodayRow();
     if (!row) return;
-    if (row.clock_in) return alert("ต้อง clock in ก่อน");
+    if (!row.clock_in) return alert("ต้อง clock in ก่อน");
     if (row.clock_out) return alert("วันนี้ clock out แล้ว");
     const next = logs.map((l) => (l.id === row.id ? { ...l, clock_out: nowISO() } : l));
     setLogs(next);
