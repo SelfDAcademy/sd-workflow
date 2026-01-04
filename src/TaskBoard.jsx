@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { PEOPLE } from "./config";
-import { getSessionUser } from "./auth/auth";
+import { getAuthProfile, getCachedAuthProfile, getSessionUser } from "./auth/auth";
 
 
 const BU_OPTIONS = ["BU1", "BU2", "comp."];
@@ -212,17 +212,36 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     `}</style>
   );
 
-  const [viewPerson, setViewPerson] = useState(() => getSessionUser() || "meen");
+    const [actorProfile, setActorProfile] = useState(() => getCachedAuthProfile());
+  const [viewPerson, setViewPerson] = useState(() => getCachedAuthProfile()?.username || getSessionUser() || "meen");
 
   const [sortFollowupAsc, setSortFollowupAsc] = useState(true);
   const [sortRoutineAsc, setSortRoutineAsc] = useState(true);
   const [sortAddonAsc, setSortAddonAsc] = useState(true);
 
+  // Supabase-backed auth profile (username/role). This keeps Taskboard aligned with Worklog roles.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const prof = await getAuthProfile();
+      if (!alive) return;
+      if (prof?.username) {
+        setActorProfile(prof);
+        // If the user hasn't intentionally switched view, default view to self
+        setViewPerson((prev) => (prev ? prev : prof.username));
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+    const actorUser = actorProfile?.username || getSessionUser() || "";
+  const actorRole = actorProfile?.role || (SUPERVISORS.includes(actorUser) ? "supervisor" : "team");
+
   const currentUser = viewPerson;
   const isOverview = currentUser === "all";
-  const isSupervisor = SUPERVISORS.includes(currentUser);
+  const isSupervisor = actorRole === "supervisor";
 
-  const isNamtip = currentUser === "namtip";
+  const isNamtip = actorUser === "namtip";
   const showAddButton = isSupervisor || isNamtip;
 
   // ✅ hide archived tasks everywhere (used by "Clear confirmed")
@@ -266,9 +285,9 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
   }, []);
 
   const pendingLeaveForFah = useMemo(() => {
-    if (currentUser !== "fah") return [];
+    if (actorUser !== "fah") return [];
     return (leaveRequests || []).filter((r) => r.type === "leave" && r.status === "pending" && r.notify_to === "fah");
-  }, [leaveRequests, currentUser]);
+  }, [leaveRequests, actorUser]);
 
   function confirmLeaveRequest(reqId) {
     const list = parseJSON(LS_LEAVE_REQUESTS, []);
@@ -276,7 +295,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     if (idx < 0) return alert("หา leave request ไม่เจอ");
 
     const req = list[idx];
-    list[idx] = { ...req, status: "confirmed", confirmed_at: new Date().toISOString(), confirmed_by: currentUser };
+    list[idx] = { ...req, status: "confirmed", confirmed_at: new Date().toISOString(), confirmed_by: actorUser };
     setJSON(LS_LEAVE_REQUESTS, list);
     setLeaveRequests(list);
 
@@ -387,7 +406,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     // 2nd confirm
     const now = new Date().toISOString();
     for (const t of clearCandidates) {
-      patchTask(t.id, { archived: true, archived_at: now, archived_by: currentUser });
+      patchTask(t.id, { archived: true, archived_at: now, archived_by: actorUser });
     }
 
     setClearStep2(false);
@@ -411,7 +430,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     const t = tasks.find((x) => x.id === taskId);
     if (!t) return;
     if (t.confirmed) return alert("งานนี้ complete แล้ว แก้ไม่ได้");
-    const canSet = t.doer === currentUser || t.support === currentUser;
+    const canSet = t.doer === actorUser || t.support === actorUser;
     if (!canSet) return alert("กำหนดวันทำงานได้เฉพาะ Doer หรือ Support");
 
     const old = t.work_at || "";
@@ -419,7 +438,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
 
     const now = new Date().toISOString();
     const nextHistory = Array.isArray(t.work_at_history) ? [...t.work_at_history] : [];
-    nextHistory.unshift({ from: old || "-", to: newDT || "-", at: now, by: currentUser });
+    nextHistory.unshift({ from: old || "-", to: newDT || "-", at: now, by: actorUser });
 
     patchTask(taskId, { work_at: newDT, work_at_history: nextHistory });
   }
@@ -448,7 +467,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     if (!isSupervisor) return alert("เฉพาะ Supervisor");
     const t = tasks.find((x) => x.id === taskId);
     if (!t) return;
-    if (t.created_by !== currentUser) return alert("คุณไม่ใช่ Supervisor เจ้าของงานนี้");
+    if (t.created_by !== actorUser) return alert("คุณไม่ใช่ Supervisor เจ้าของงานนี้");
     if (t.status !== "done") return alert("ยังไม่ done");
     if (!t.result?.trim()) return alert("ยังไม่มี result");
 
@@ -460,7 +479,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     const t = tasks.find((x) => x.id === taskId);
     if (!t) return;
     if (!isSupervisor) return;
-    if (t.created_by !== currentUser) return alert("ติดตามได้เฉพาะ Supervisor เจ้าของงาน");
+    if (t.created_by !== actorUser) return alert("ติดตามได้เฉพาะ Supervisor เจ้าของงาน");
     if (t.confirmed) return;
 
     const arr = Array.isArray(t.followup_done) ? [...t.followup_done] : [false, false, false];
@@ -479,7 +498,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
 
     const t = {
       id: newId(),
-      created_by: currentUser,
+      created_by: actorUser,
       assigned_date: draft.assigned_date,
       bu: draft.bu,
       project: draft.project,
@@ -505,14 +524,14 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
   // selectors
   const myPendingConfirm = useMemo(() => {
     if (!isSupervisor) return [];
-    return tasksLive.filter((t) => t.created_by === currentUser && t.status === "done" && t.result?.trim() && !t.confirmed);
-  }, [tasks, currentUser, isSupervisor]);
+    return tasksLive.filter((t) => t.created_by === actorUser && t.status === "done" && t.result?.trim() && !t.confirmed);
+  }, [tasks, actorUser, isSupervisor]);
 
   const myAssigned = useMemo(() => {
     if (!isSupervisor) return [];
-    const list = tasksLive.filter((t) => t.created_by === currentUser);
+    const list = tasksLive.filter((t) => t.created_by === actorUser);
     return sortWithGroups(list, sortFollowupAsc);
-  }, [tasks, currentUser, isSupervisor, sortFollowupAsc]);
+  }, [tasks, actorUser, isSupervisor, sortFollowupAsc]);
 
   const myTasks = useMemo(() => {
     if (isOverview) return [];
@@ -985,7 +1004,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
             <Panel title="Pending confirmations" minimized={minPending} onToggle={() => setMinPending((v) => !v)} headerTight>
               {!minPending && (
                 <div style={{ maxHeight: SUP_PENDING_MAX_H - 44, overflowY: "auto", paddingRight: 4 }}>
-                  {currentUser === "fah" && pendingLeaveForFah.length > 0 && (
+                  {actorUser === "fah" && pendingLeaveForFah.length > 0 && (
                     <div style={{ marginBottom: 10 }}>
                       <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, opacity: 0.9 }}>
                         Leave requests (from Worklog)
@@ -1038,7 +1057,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
             <div />
 
             <Panel
-              title={`Supervisor follow-up (${currentUser})`}
+              title={`Supervisor follow-up (${actorUser || currentUser})`}
               minimized={minFollowup}
               onToggle={() => setMinFollowup((v) => !v)}
               headerTight
@@ -1114,7 +1133,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
             {!minRoutine && (
               <TaskList
                 items={myRoutine}
-                currentUser={currentUser}
+                currentUser={actorUser}
                 expandedCard={expandedCard}
                 setExpandedCard={setExpandedCard}
                 onSetWorkAt={setWorkAt}
@@ -1132,7 +1151,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
             {!minAddon && (
               <TaskList
                 items={myAddon}
-                currentUser={currentUser}
+                currentUser={actorUser}
                 expandedCard={expandedCard}
                 setExpandedCard={setExpandedCard}
                 onSetWorkAt={setWorkAt}
