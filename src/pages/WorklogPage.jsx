@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTasks } from "../TaskStore";
+import { supabase } from "../supabaseClient";
 
 const PEOPLE = ["meen", "art", "yung", "boy", "namtip", "tong", "fah", "pluem"];
 const USER_TYPE = {
@@ -173,30 +174,42 @@ function getRole(userKey) {
   return userKey && SUPERVISORS.has(userKey) ? "supervisor" : "team";
 }
 
-// Optional: detect Supabase auth from a global client (won't break if absent)
-async function tryGetSupabaseEmail() {
+
+// Supabase auth: prefer reading from Supabase Auth + profiles table.
+// (Doesn't break if Supabase isn't configured; it will just return empty values.)
+async function tryGetSupabaseProfile() {
   try {
-    const sb = globalThis?.supabase;
-    if (!sb?.auth) return "";
-    // v2: getSession()
-    if (typeof sb.auth.getSession === "function") {
-      const { data, error } = await sb.auth.getSession();
-      if (error) return "";
-      const email = data?.session?.user?.email || "";
-      return email || "";
+    if (!supabase?.auth) return { email: "", userKey: "", role: "" };
+
+    // Get current user
+    const { data: userData, error: userErr } = await supabase.auth.getUser();
+    if (userErr) return { email: "", userKey: "", role: "" };
+    const user = userData?.user;
+    const email = user?.email || "";
+    const userId = user?.id || "";
+    if (!email || !userId) return { email: "", userKey: "", role: "" };
+
+    // Read profile row
+    const { data: prof, error: profErr } = await supabase
+      .from("profiles")
+      .select("username, role, email")
+      .eq("id", userId)
+      .single();
+
+    if (!profErr && prof) {
+      const userKey = String(prof.username || "").trim();
+      const role = String(prof.role || "").trim();
+      return { email: prof.email || email, userKey, role };
     }
-    // fallback: getUser()
-    if (typeof sb.auth.getUser === "function") {
-      const { data, error } = await sb.auth.getUser();
-      if (error) return "";
-      const email = data?.user?.email || "";
-      return email || "";
-    }
-    return "";
+
+    // Fallback: infer from email if profile isn't readable yet
+    const inferred = inferUserFromEmail(email);
+    return { email, userKey: inferred, role: inferred ? getRole(inferred) : "" };
   } catch {
-    return "";
+    return { email: "", userKey: "", role: "" };
   }
 }
+
 
 function Card({ title, children, scroll }) {
   return (
@@ -268,24 +281,30 @@ export default function WorklogPage() {
   useEffect(() => setJSON(LS_LOGS, logs), [logs]);
   useEffect(() => setJSON(LS_LEAVE_REQUESTS, leaveRequests), [leaveRequests]);
 
-  // Auth bootstrap: if Supabase session exists, auto-map email -> userKey and set as acting user.
+  // Auth bootstrap: if Supabase session exists, load profile (username/role) from DB and use as acting user.
   useEffect(() => {
     let alive = true;
     (async () => {
-      const email = await tryGetSupabaseEmail();
+      const prof = await tryGetSupabaseProfile();
       if (!alive) return;
-      if (!email) return;
-      const userKey = inferUserFromEmail(email);
-      if (!userKey) return;
+
+      const email = prof.email || "";
+      const userKey = prof.userKey || "";
+      const role = prof.role || (userKey ? getRole(userKey) : "");
+
+      if (!email || !userKey) return;
+
       setAuthEmail(email);
       setAuthUserKey(userKey);
-      setAuthRole(getRole(userKey));
+      setAuthRole(role);
+
       // keep local session in sync (so old flows still work)
       setSessionUser(userKey);
       setJSON(LS_SESSION, { user: userKey, at: nowISO() });
     })();
     return () => { alive = false; };
   }, []);
+
 
   // Ensure viewer defaults to acting user
   useEffect(() => {
