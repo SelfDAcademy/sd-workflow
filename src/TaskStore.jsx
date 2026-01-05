@@ -21,15 +21,20 @@ function safeParse(json, fallback) {
   }
 }
 
-function newId(prefix = "id") {
-  // Use UUID so it can be used safely with Supabase uuid columns.
+function newId(prefix = "") {
+  // Generate a real UUID (compatible with Supabase uuid columns).
   // Fallback keeps things working in older browsers/environments.
   const uuid =
     (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
-    `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
-  // Keep prefix in local-mode readability, but UUID is the important part.
+    `${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}-${Math.random()
+      .toString(16)
+      .slice(2)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+
+  // In LOCAL mode you may want readable prefixes; in Supabase mode we should never send prefixed ids.
+  // We keep prefixing available for local ids only; DB inserts will strip non-uuid ids anyway.
   return prefix ? `${prefix}_${uuid}` : uuid;
 }
+
 
 function addDays(ymd, days) {
   const d = new Date(`${ymd}T00:00:00`);
@@ -204,8 +209,19 @@ async function ensureAuthenticated() {
     // IMPORTANT: When tables use uuid columns, never send non-uuid ids (e.g. "t_06jkf0i").
     const safeTask = stripInvalidUuidIds(newTask, ["id", "project_id"]);
 
-    const { error } = await supabase.from("tasks").insert([safeTask]);
-    if (error) alert(error.message);
+    const { data, error } = await supabase
+      .from("tasks")
+      .insert([safeTask])
+      .select("*")
+      .single();
+
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    // Keep local state in sync immediately (so subsequent updates use the real uuid id).
+    setTasks((prev) => [data, ...prev]);
   }
 
   async function updateTask(id, patch) {
@@ -215,8 +231,19 @@ async function ensureAuthenticated() {
     }
     const auth = await ensureAuthenticated();
     if (!auth.ok) return;
+    if (!isUuid(id)) {
+      alert("Task id ไม่ถูกต้อง (ไม่ใช่ uuid) จึงไม่สามารถอัปเดตบน Supabase ได้");
+      return;
+    }
+
     const { error } = await supabase.from("tasks").update(patch).eq("id", id);
-    if (error) alert(error.message);
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    // Optimistic local update (UI stays the same; this prevents needing to wait for polling).
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   }
 
   async function createProject({
@@ -266,17 +293,20 @@ async function ensureAuthenticated() {
     if (!auth.ok) return null;
 
     // Supabase mode: let DB generate uuid `projects.id` and use that uuid for tasks.project_id.
-    const pIns = await supabase.from("projects").insert([project]).select("id");
+    const pIns = await supabase.from("projects").insert([project]).select("id").single();
     if (pIns.error) {
       alert(pIns.error.message);
       return null;
     }
 
-    const project_id = pIns.data?.[0]?.id || null;
+    const project_id = pIns.data?.id || null;
     if (!project_id) {
       alert("สร้างโปรเจกต์สำเร็จ แต่ไม่สามารถอ่าน id กลับมาได้ (ตรวจ RLS/permissions)");
       return null;
     }
+
+    // Keep projects list in sync immediately
+    setProjects((prev) => [{ id: project_id, ...project }, ...prev]);
 
     const wf = buildWorkflowTasks({
       project_id,
