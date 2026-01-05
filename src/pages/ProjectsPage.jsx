@@ -344,15 +344,14 @@ export default function ProjectsPage() {
   }, [projects]);
 
   const tasksByProject = useMemo(() => {
-    // ✅ Stable grouping (no dependency on visibleProjects)
-    // เหตุผล: บางครั้ง visibleProjects / projects อาจ hydrate ทีหลัง ทำให้ task โผล่แว๊บเดียวแล้วหาย (race)
-    // เราเลย group ตาม project_id อย่างเดียว แล้วค่อยเลือกโชว์ตอน render ด้วย p.id
+    // ✅ Group tasks by project_id (string-normalized) so Projectboard can always find them
     const map = new Map();
 
     for (const t of tasks) {
-      const pid = t.project_id || t.projectId;
-      if (!pid) continue;
+      const pidRaw = t.project_id || t.projectId || t.projectID;
+      if (!pidRaw) continue;
 
+      const pid = String(pidRaw);
       if (!map.has(pid)) map.set(pid, []);
       map.get(pid).push(t);
     }
@@ -472,7 +471,12 @@ export default function ProjectsPage() {
         {visibleProjects.length === 0 && <div style={{ opacity: 0.7, marginTop: 14 }}>ยังไม่มีโปรเจกต์ DC/DCP</div>}
 
         {visibleProjects.map((p) => {
-          const arr = tasksByProject.get(p.id) || [];
+          const arr =
+            tasksByProject.get(p.id) ||
+            tasksByProject.get(p.project_id) ||
+            tasksByProject.get(p.projectId) ||
+            tasksByProject.get(p.id?.toString?.()) ||
+            [];
           return <ProjectInstance key={p.id} project={p} tasks={arr} updateTask={updateTask} />;
         })}
       </div>
