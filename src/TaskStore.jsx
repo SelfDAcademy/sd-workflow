@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
 
 const TaskContext = createContext(null);
@@ -154,6 +154,17 @@ export function TaskProvider({ children }) {
 
   const supaEnabled = Boolean(supabase);
 
+
+  // Track tasks being updated locally to prevent the periodic reload from "flickering" values.
+  const pendingTaskIdsRef = useRef(new Set());
+
+  function mergeServerTasksPreservingPending(prev, server) {
+    const pending = pendingTaskIdsRef.current;
+    if (!pending || pending.size === 0) return server;
+    const prevById = new Map((prev || []).map((x) => [x.id, x]));
+    return (server || []).map((row) => (pending.has(row.id) ? (prevById.get(row.id) || row) : row));
+  }
+
 // Ensure requests that need RLS-protected writes are authenticated (have a Supabase session).
 async function ensureAuthenticated() {
   if (!supaEnabled) return { ok: false, session: null };
@@ -176,7 +187,7 @@ async function ensureAuthenticated() {
       if (!pRes.error && mounted) setProjects(pRes.data || []);
 
       const tRes = await supabase.from("tasks").select("*").eq("archived", false).order("created_at", { ascending: false });
-      if (!tRes.error && mounted) setTasks(tRes.data || []);
+      if (!tRes.error && mounted) setTasks((prev) => mergeServerTasksPreservingPending(prev, tRes.data || []));
     }
 
     load();
@@ -213,7 +224,6 @@ async function ensureAuthenticated() {
       .from("tasks")
       .insert([safeTask])
       .select("*")
-      .single();
 
     if (error) {
       alert(error.message);
@@ -221,7 +231,12 @@ async function ensureAuthenticated() {
     }
 
     // Keep local state in sync immediately (so subsequent updates use the real uuid id).
-    setTasks((prev) => [data, ...prev]);
+    // If RLS prevents RETURNING the row, keep a local copy; polling will reconcile later.
+    if (data && data[0]) {
+      setTasks((prev) => [(data && data[0]) || safeTask, ...prev]);
+    } else {
+      setTasks((prev) => [safeTask, ...prev]);
+    }
   }
 
   async function updateTask(id, patch) {
@@ -236,14 +251,34 @@ async function ensureAuthenticated() {
       return;
     }
 
-    const { error } = await supabase.from("tasks").update(patch).eq("id", id);
+    // Optimistic UI update (no UI changes; just keeps local state consistent)
+    pendingTaskIdsRef.current.add(id);
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+
+    const { data, error } = await supabase
+      .from("tasks")
+      .update(patch)
+      .eq("id", id)
+      .select("id");
+
+    // data is an array of updated rows (possibly empty)
+
     if (error) {
+      pendingTaskIdsRef.current.delete(id);
       alert(error.message);
       return;
     }
 
-    // Optimistic local update (UI stays the same; this prevents needing to wait for polling).
-    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    // If no rows were updated, PostgREST returns an empty array.
+// This usually means the row wasn't found or RLS blocked the update.
+if (!data || data.length === 0) {
+      pendingTaskIdsRef.current.delete(id);
+      alert("อัปเดตไม่สำเร็จ (ไม่พบแถวที่ถูกแก้ไข) — อาจเป็นสิทธิ์/RLS หรือ id ไม่ตรงกับข้อมูลใน DB");
+      return;
+    }
+
+// Keep optimistic state; polling will reconcile if needed.
+pendingTaskIdsRef.current.delete(id);
   }
 
   async function createProject({
@@ -293,13 +328,13 @@ async function ensureAuthenticated() {
     if (!auth.ok) return null;
 
     // Supabase mode: let DB generate uuid `projects.id` and use that uuid for tasks.project_id.
-    const pIns = await supabase.from("projects").insert([project]).select("id").single();
+    const pIns = await supabase.from("projects").insert([project]).select("id");
     if (pIns.error) {
       alert(pIns.error.message);
       return null;
     }
 
-    const project_id = pIns.data?.id || null;
+    const project_id = (pIns.data && pIns.data[0] && pIns.data[0].id) || null;
     if (!project_id) {
       alert("สร้างโปรเจกต์สำเร็จ แต่ไม่สามารถอ่าน id กลับมาได้ (ตรวจ RLS/permissions)");
       return null;
