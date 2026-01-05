@@ -300,6 +300,9 @@ pendingTaskIdsRef.current.delete(id);
       title: name, // satisfy DB NOT NULL title; keep name for UI
       bu,
       supervisor,
+      // DB schema requires a primary doer/owner on projects.
+      // Use doer_default to satisfy NOT NULL constraint without affecting UI.
+      doer: doer_default,
       start_date,
       event_date: event_date || "",
       doer_default,
