@@ -11,6 +11,7 @@ export default function RequireAuth({ children }) {
     let mounted = true;
 
     async function init() {
+      // Local mode: always allow
       if (!supabase) {
         if (mounted) {
           setAuthed(true);
@@ -18,10 +19,17 @@ export default function RequireAuth({ children }) {
         }
         return;
       }
-      const { data } = await supabase.auth.getSession();
-      if (mounted) {
+
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!mounted) return;
         setAuthed(Boolean(data?.session));
-        setLoading(false);
+      } catch {
+        // If session check fails (env/CORS/network), do NOT hang forever
+        if (!mounted) return;
+        setAuthed(false);
+      } finally {
+        if (mounted) setLoading(false);
       }
     }
 
