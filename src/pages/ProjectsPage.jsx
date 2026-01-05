@@ -344,21 +344,39 @@ export default function ProjectsPage() {
   }, [projects]);
 
   const tasksByProject = useMemo(() => {
-    const map = new Map();
-    for (const t of tasks) {
-      if (!t.project_id) continue;
-      if (t.project !== "DC" && t.project !== "DCP") continue;
-      if (!t.assigned_date || !t.deadline) continue;
+  const map = new Map();
 
-      if (!map.has(t.project_id)) map.set(t.project_id, []);
-      map.get(t.project_id).push(t);
-    }
-    for (const [k, arr] of map.entries()) {
-      arr.sort((a, b) => Date.parse(a.deadline) - Date.parse(b.deadline));
-      map.set(k, arr);
-    }
-    return map;
-  }, [tasks]);
+  for (const t of tasks) {
+    // ต้องมี project_id เท่านั้นถึงนับเป็น task ของโปรเจกต์
+    if (!t.project_id) continue;
+
+    // รองรับชื่อฟิลด์หลายแบบ (กันข้อมูลจากรุ่นเก่า/คนละหน้า)
+    const kind = t.project_kind || t.projectKind || t.project || t.kind;
+
+    // โปรเจกต์ของหน้านี้โชว์เฉพาะ DC/DCP
+    if (kind !== "DC" && kind !== "DCP") continue;
+
+    if (!map.has(t.project_id)) map.set(t.project_id, []);
+    map.get(t.project_id).push(t);
+  }
+
+  // เรียง: ถ้ามี deadline ให้เรียงตาม deadline, ถ้าไม่มีให้เรียงตาม created_at แทน
+  for (const [k, arr] of map.entries()) {
+    arr.sort((a, b) => {
+      const ad = a.deadline ? Date.parse(a.deadline) : Number.POSITIVE_INFINITY;
+      const bd = b.deadline ? Date.parse(b.deadline) : Number.POSITIVE_INFINITY;
+      if (ad !== bd) return ad - bd;
+
+      const ac = a.created_at ? Date.parse(a.created_at) : 0;
+      const bc = b.created_at ? Date.parse(b.created_at) : 0;
+      return ac - bc;
+    });
+    map.set(k, arr);
+  }
+
+  return map;
+}, [tasks]);
+
 
   return (
     <main style={{ padding: 24 }}>
