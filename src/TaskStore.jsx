@@ -117,12 +117,20 @@ function buildWorkflowTasks({
 }
 
 export function TaskProvider({ children }) {
+  const supaEnabled = Boolean(supabase);
+
   const [projects, setProjects] = useState(() => {
+    // ✅ In Supabase mode, start from empty to avoid flicker from stale localStorage data.
+    // LocalStorage is only used in LOCAL mode.
+    if (supaEnabled) return [];
     const raw = localStorage.getItem(LS_PROJECTS);
     return raw ? safeParse(raw, []) : [];
   });
 
   const [tasks, setTasks] = useState(() => {
+    // ✅ In Supabase mode, start from empty to avoid flicker from stale localStorage/seed data.
+    // LocalStorage/seed are only for LOCAL mode.
+    if (supaEnabled) return [];
     const raw = localStorage.getItem(LS_TASKS);
     if (raw) return safeParse(raw, []);
     return [
@@ -151,8 +159,6 @@ export function TaskProvider({ children }) {
       },
     ];
   });
-
-  const supaEnabled = Boolean(supabase);
 
 
   // Track tasks being updated locally to prevent the periodic reload from "flickering" values.
@@ -183,11 +189,27 @@ async function ensureAuthenticated() {
     let mounted = true;
 
     async function load() {
-      const pRes = await supabase.from("projects").select("*").order("created_at", { ascending: false });
-      if (!pRes.error && mounted) setProjects((pRes.data || []).map((p) => ({ ...p, id: p.id || p.project_id || p.projectId || p.project_id, name: p.name ?? p.title ?? p.project_name ?? p.projectTitle ?? "" })));
+      // Fetch both datasets first, then update state together to reduce UI flicker/races.
+      const [pRes, tRes] = await Promise.all([
+        supabase.from("projects").select("*").order("created_at", { ascending: false }),
+        supabase.from("tasks").select("*").eq("archived", false).order("created_at", { ascending: false }),
+      ]);
 
-      const tRes = await supabase.from("tasks").select("*").eq("archived", false).order("created_at", { ascending: false });
-      if (!tRes.error && mounted) setTasks((prev) => mergeServerTasksPreservingPending(prev, tRes.data || []));
+      if (!mounted) return;
+
+      if (!pRes.error) {
+        setProjects(
+          (pRes.data || []).map((p) => ({
+            ...p,
+            id: p.id || p.project_id || p.projectId || p.project_id,
+            name: p.name ?? p.title ?? p.project_name ?? p.projectTitle ?? "",
+          }))
+        );
+      }
+
+      if (!tRes.error) {
+        setTasks((prev) => mergeServerTasksPreservingPending(prev, tRes.data || []));
+      }
     }
 
     load();
