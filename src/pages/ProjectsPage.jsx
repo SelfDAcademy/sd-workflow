@@ -66,7 +66,7 @@ function setJSON(key, value) {
 }
 
 function getProjectEnd(project, tasks) {
-  const ends = tasks.map((t) => t.deadline).filter(Boolean);
+  const ends = tasks.map((t) => t.deadline || t.due_date || t.dueDate).filter(Boolean);
   if (ends.length > 0) {
     ends.sort((a, b) => Date.parse(a) - Date.parse(b));
     return ends[ends.length - 1];
@@ -223,7 +223,7 @@ function ProjectTickTable({ project, tasks, updateTask }) {
                     </select>
 
                     <span>type:{t.type}</span>
-                    <span>deadline:{fmtDM(t.deadline)}</span>
+                    <span>deadline:{fmtDM(t.deadline || t.due_date || t.dueDate)}</span>
                   </div>
                 </td>
 
@@ -344,39 +344,37 @@ export default function ProjectsPage() {
   }, [projects]);
 
   const tasksByProject = useMemo(() => {
-  const map = new Map();
+    // ✅ Stable grouping (no dependency on visibleProjects)
+    // เหตุผล: บางครั้ง visibleProjects / projects อาจ hydrate ทีหลัง ทำให้ task โผล่แว๊บเดียวแล้วหาย (race)
+    // เราเลย group ตาม project_id อย่างเดียว แล้วค่อยเลือกโชว์ตอน render ด้วย p.id
+    const map = new Map();
 
-  for (const t of tasks) {
-    // ต้องมี project_id เท่านั้นถึงนับเป็น task ของโปรเจกต์
-    if (!t.project_id) continue;
+    for (const t of tasks) {
+      const pid = t.project_id || t.projectId;
+      if (!pid) continue;
 
-    // รองรับชื่อฟิลด์หลายแบบ (กันข้อมูลจากรุ่นเก่า/คนละหน้า)
-    const kind = t.project_kind || t.projectKind || t.project || t.kind;
+      if (!map.has(pid)) map.set(pid, []);
+      map.get(pid).push(t);
+    }
 
-    // โปรเจกต์ของหน้านี้โชว์เฉพาะ DC/DCP
-    if (kind !== "DC" && kind !== "DCP") continue;
+    // Sort: deadline ก่อน (ถ้ามี) ไม่งั้นเรียงตาม created_at
+    for (const [pid, arr] of map.entries()) {
+      arr.sort((a, b) => {
+        const ad = a.deadline || a.due_date || a.dueDate;
+        const bd = b.deadline || b.due_date || b.dueDate;
+        const aTime = ad ? Date.parse(ad) : Number.POSITIVE_INFINITY;
+        const bTime = bd ? Date.parse(bd) : Number.POSITIVE_INFINITY;
+        if (aTime !== bTime) return aTime - bTime;
 
-    if (!map.has(t.project_id)) map.set(t.project_id, []);
-    map.get(t.project_id).push(t);
-  }
+        const ac = a.created_at ? Date.parse(a.created_at) : 0;
+        const bc = b.created_at ? Date.parse(b.created_at) : 0;
+        return ac - bc;
+      });
+      map.set(pid, arr);
+    }
 
-  // เรียง: ถ้ามี deadline ให้เรียงตาม deadline, ถ้าไม่มีให้เรียงตาม created_at แทน
-  for (const [k, arr] of map.entries()) {
-    arr.sort((a, b) => {
-      const ad = a.deadline ? Date.parse(a.deadline) : Number.POSITIVE_INFINITY;
-      const bd = b.deadline ? Date.parse(b.deadline) : Number.POSITIVE_INFINITY;
-      if (ad !== bd) return ad - bd;
-
-      const ac = a.created_at ? Date.parse(a.created_at) : 0;
-      const bc = b.created_at ? Date.parse(b.created_at) : 0;
-      return ac - bc;
-    });
-    map.set(k, arr);
-  }
-
-  return map;
-}, [tasks]);
-
+    return map;
+  }, [tasks]);
 
   return (
     <main style={{ padding: 24 }}>
