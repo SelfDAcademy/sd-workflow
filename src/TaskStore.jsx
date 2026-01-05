@@ -184,7 +184,7 @@ async function ensureAuthenticated() {
 
     async function load() {
       const pRes = await supabase.from("projects").select("*").order("created_at", { ascending: false });
-      if (!pRes.error && mounted) setProjects(pRes.data || []);
+      if (!pRes.error && mounted) setProjects((pRes.data || []).map((p) => ({ ...p, id: p.id || p.project_id || p.projectId || p.project_id, name: p.name ?? p.title ?? p.project_name ?? p.projectTitle ?? "" })));
 
       const tRes = await supabase.from("tasks").select("*").eq("archived", false).order("created_at", { ascending: false });
       if (!tRes.error && mounted) setTasks((prev) => mergeServerTasksPreservingPending(prev, tRes.data || []));
@@ -297,6 +297,7 @@ pendingTaskIdsRef.current.delete(id);
     const project = {
       kind: project_kind,
       name,
+      title: name, // satisfy DB NOT NULL title; keep name for UI
       bu,
       supervisor,
       start_date,
@@ -305,6 +306,12 @@ pendingTaskIdsRef.current.delete(id);
       support_default,
       created_at: new Date().toISOString(),
     };
+
+    // For Supabase insert, send only columns that are expected by DB.
+    // (Keep UI-friendly fields like `name` in local state even if DB schema uses `title`.)
+    const insertProject = { ...project };
+    // If your DB does not have `name` column, avoid insert errors:
+    delete insertProject.name;
 
     if (!supaEnabled) {
       const projectLocal = { id: local_project_id, ...project };
@@ -328,20 +335,20 @@ pendingTaskIdsRef.current.delete(id);
     if (!auth.ok) return null;
 
     // Supabase mode: let DB generate uuid `projects.id` and use that uuid for tasks.project_id.
-    const pIns = await supabase.from("projects").insert([project]).select("id");
+    const pIns = await supabase.from("projects").insert([insertProject]).select("project_id");
     if (pIns.error) {
       alert(pIns.error.message);
       return null;
     }
 
-    const project_id = (pIns.data && pIns.data[0] && pIns.data[0].id) || null;
+    const project_id = (pIns.data && pIns.data[0] && pIns.data[0].project_id) || null;
     if (!project_id) {
       alert("สร้างโปรเจกต์สำเร็จ แต่ไม่สามารถอ่าน id กลับมาได้ (ตรวจ RLS/permissions)");
       return null;
     }
 
     // Keep projects list in sync immediately
-    setProjects((prev) => [{ id: project_id, ...project }, ...prev]);
+    setProjects((prev) => [{ id: project_id, project_id, ...project }, ...prev]);
 
     const wf = buildWorkflowTasks({
       project_id,
