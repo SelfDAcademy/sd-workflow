@@ -299,6 +299,11 @@ function ProjectInstance({ project, tasks, updateTask }) {
 
 export default function ProjectsPage() {
   const { projects, tasks, createProject, updateTask } = useTasks();
+// --- Patch (เฉพาะประเด็น: ให้ Task ที่สร้างจาก Projectboard มีชื่อโปรเจกต์ instance เช่น D-Camp14) ---
+// แนวทาง: backfill field `project_name` ให้ tasks ที่มี project_id ตรงกับ project.id
+// เพื่อให้ TaskBoard แสดงชื่อโปรเจกต์ได้ (ไม่แตะ UI/logic อื่น)
+const _normalizePid = (v) => (v == null ? "" : String(v));
+
 
   const [form, setForm] = useState({
     kind: "DC",
@@ -310,6 +315,36 @@ export default function ProjectsPage() {
     start_date: "",
     event_date: "",
   });
+// ✅ Backfill project_name ให้ tasks ของทุกโปรเจกต์ (รวมของเก่า) เพื่อให้ TaskBoard แสดง "D-Camp14" ได้
+useEffect(() => {
+  if (!Array.isArray(projects) || !Array.isArray(tasks)) return;
+  if (typeof updateTask !== "function") return;
+
+  const projectNameById = new Map();
+  for (const p of projects) {
+    const pid = _normalizePid(p?.id || p?.project_id || p?.projectId || p?.projectID);
+    if (!pid) continue;
+    const pname = p?.name || p?.project_name || p?.title || p?.projectTitle || "";
+    if (!pname) continue;
+    projectNameById.set(pid, pname);
+  }
+
+  // อัปเดตเฉพาะ task ที่ยังไม่มี project_name (หรือไม่ตรง) เพื่อไม่ให้ loop
+  for (const t of tasks) {
+    const pid = _normalizePid(t?.project_id || t?.projectId || t?.projectID);
+    if (!pid) continue;
+
+    const pname = projectNameById.get(pid);
+    if (!pname) continue;
+
+    const cur = t?.project_name || t?.projectName || t?.projectTitle || "";
+    if (cur === pname) continue;
+
+    // ปลอดภัย: update เฉพาะ field เพิ่มเติมที่จำเป็นสำหรับการแสดงผลชื่อโปรเจกต์
+    updateTask?.(t.id, { project_name: pname });
+  }
+}, [projects, tasks, updateTask]);
+
 
   function onCreate() {
     if (!form.name.trim()) return alert("ใส่ชื่อโปรเจกต์ก่อน");
@@ -334,7 +369,20 @@ export default function ProjectsPage() {
     // ✅ persist project owners from Create Project form (so header always shows form values)
     const ownersStore = parseJSON(LS_PROJECT_OWNERS, {});
     ownersStore[pid] = { doer: form.doer_default || "", support: form.support_default || "" };
-    setJSON(LS_PROJECT_OWNERS, ownersStore);
+    
+// ✅ พยายาม backfill project_name ให้ tasks ของโปรเจกต์ที่เพิ่งสร้าง (เผื่อ createProject สร้าง tasks แบบ sync)
+// ถ้ายังไม่มีก็ไม่เป็นไร เพราะ useEffect ข้างบนจะ backfill ให้อัตโนมัติเมื่อ tasks ถูกเพิ่มเข้ามา
+try {
+  const pname = form.name.trim();
+  for (const t of tasks || []) {
+    const pidRaw = t.project_id || t.projectId || t.projectID;
+    if (String(pidRaw) !== String(pid)) continue;
+    const cur = t.project_name || t.projectName || t.projectTitle || "";
+    if (cur === pname) continue;
+    updateTask?.(t.id, { project_name: pname });
+  }
+} catch {}
+setJSON(LS_PROJECT_OWNERS, ownersStore);
 
     alert(`สร้างโปรเจกต์สำเร็จ ✅\nproject_id: ${pid}`);
   }

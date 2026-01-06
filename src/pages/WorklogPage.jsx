@@ -36,6 +36,69 @@ const SUPERVISORS = new Set(["fah", "pluem", "namtip"]);
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+const TZ = "Asia/Bangkok";
+
+function utcDateFromYMD(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || "").trim());
+  if (!m) return new Date(Date.UTC(1970, 0, 1));
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  return new Date(Date.UTC(y, mo - 1, d));
+}
+function ymdFromUTCDate(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+function hhmmInTZFromISO(iso) {
+  if (!iso) return null;
+
+  // Supabase/Postgres "timestamp without time zone" often returns strings like
+  // "2026-01-05T11:45:00" (no Z / no offset). If we originally saved a UTC ISO
+  // string (with Z), Postgres may have dropped the timezone and kept the UTC wall time.
+  // In Thailand this shows as 7 hours behind unless we interpret the naive string as UTC.
+  const raw = String(iso).trim();
+  const hasZone =
+    /[zZ]$/.test(raw) ||
+    /[+-]\d{2}:?\d{2}$/.test(raw) ||
+    /[+-]\d{2}$/.test(raw);
+
+  // Normalize:
+  // - replace space with T if needed
+  // - if no timezone info, append Z to treat as UTC
+  const normalized = (() => {
+    const t = raw.includes(" ") && !raw.includes("T") ? raw.replace(" ", "T") : raw;
+    return hasZone ? t : `${t}Z`;
+  })();
+
+  try {
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) return null;
+
+    // Primary: render Bangkok time via Intl
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: TZ,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(dt);
+
+    const h = Number(parts.find((p) => p.type === "hour")?.value);
+    const m = Number(parts.find((p) => p.type === "minute")?.value);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    return { h, m };
+  } catch {
+    // Fallback: compute Bangkok time from UTC (Bangkok = UTC+7, no DST)
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) return null;
+    const h = (dt.getUTCHours() + 7) % 24;
+    const m = dt.getUTCMinutes();
+    return { h, m };
+  }
+}
+
 const WORK_MOODS = [
   { key: "🔥", label: "พร้อมลุย" },
   { key: "🙂", label: "ปกติ" },
@@ -60,29 +123,37 @@ function nowISO() {
   return new Date().toISOString();
 }
 function todayYMD() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
+  try {
+    // Always compute "today" in Thailand time to avoid UTC shift issues
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+  } catch {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+  }
 }
 function localDOW(ymd) {
-  return DOW[new Date(`${ymd}T00:00:00`).getDay()];
+  const d = utcDateFromYMD(ymd);
+  return DOW[d.getUTCDay()];
 }
 function getWeekStartMonday(ymd) {
-  const d = new Date(`${ymd}T00:00:00`);
-  const day = d.getDay();
-  const diff = (day === 0 ? -6 : 1) - day;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
+  const d = utcDateFromYMD(ymd);
+  const day = d.getUTCDay(); // 0 Sun..6 Sat
+  const diff = (day === 0 ? -6 : 1) - day; // Monday start
+  d.setUTCDate(d.getUTCDate() + diff);
+  return ymdFromUTCDate(d);
 }
 function addDaysYMD(ymd, days) {
-  const d = new Date(`${ymd}T00:00:00`);
-  d.setDate(d.getDate() + days);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
+  const d = utcDateFromYMD(ymd);
+  d.setUTCDate(d.getUTCDate() + days);
+  return ymdFromUTCDate(d);
 }
 function minutesBetween(startHHMM, endHHMM) {
   if (!startHHMM || !endHHMM) return 0;
@@ -92,14 +163,14 @@ function minutesBetween(startHHMM, endHHMM) {
   return Math.max(0, (eh * 60 + em) - (sh * 60 + sm));
 }
 function minutesFromISO(iso) {
-  if (!iso) return null;
-  const hh = Number(iso.slice(11, 13));
-  const mm = Number(iso.slice(14, 16));
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return hh * 60 + mm;
+  const t = hhmmInTZFromISO(iso);
+  if (!t) return null;
+  return t.h * 60 + t.m;
 }
 function timeFromISO(iso) {
-  return iso ? iso.slice(11, 16) : "-";
+  const t = hhmmInTZFromISO(iso);
+  if (!t) return "-";
+  return `${String(t.h).padStart(2, "0")}:${String(t.m).padStart(2, "0")}`;
 }
 function safeId() {
   try {
@@ -270,7 +341,7 @@ export default function WorklogPage() {
   const [authRole, setAuthRole] = useState("");
 
   // Viewer (right-top dropdown): can view anyone, edit only self (per permissions)
-  const [viewUser, setViewUser] = useState("");
+  const [viewUser, setViewUser] = useState(() => parseJSON(LS_SESSION, null)?.user || "");
 
   const actingUser = authUserKey || sessionUser || "";
   const actingRole = authRole || (actingUser ? getRole(actingUser) : "");
@@ -316,7 +387,14 @@ export default function WorklogPage() {
     setViewUser((prev) => (prev ? prev : actingUser));
   }, [actingUser]);
 
-  const today = todayYMD();
+const [dayTick, setDayTick] = useState(0);
+useEffect(() => {
+  const id = setInterval(() => setDayTick((x) => x + 1), 30 * 1000);
+  return () => clearInterval(id);
+}, []);
+
+const today = useMemo(() => todayYMD(), [dayTick]);
+
   const todayDow = localDOW(today);
 
   const miniDays = useMemo(() => {
@@ -432,7 +510,7 @@ const planKey = makePlanKey(planUser, weekStart);
 
   const ongoingTasks = useMemo(() => {
     if (!planUser) return [];
-    return tasks.filter((t) => (t.doer === planUser || t.support === planUser) && t.status !== "done");
+    return tasks.filter((t) => (t.doer === planUser || t.support === planUser) && !t.archived && !t.confirmed);
   }, [tasks, planUser]);
 
   const [sickOpen, setSickOpen] = useState(false);
@@ -485,12 +563,23 @@ const planKey = makePlanKey(planUser, weekStart);
   function clockIn() {
     if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
     if (!actingUser) return alert("ต้องปลดล็อกก่อน");
-    const row = ensureTodayRow();
-    if (!row) return;
-    if (row.clock_in) return alert("วันนี้ clock in แล้ว");
-    const next = logs.map((l) => (l.id === row.id ? { ...l, clock_in: nowISO() } : l));
-    setLogs(next);
+
+    const today = todayYMD();
+    const now = nowISO();
+
+    // ✅ Fix A5: ถ้ายังไม่มี row ของวันนี้ ให้สร้างพร้อมบันทึก clock_in ในครั้งเดียว
+    // (เดิมใช้ ensureTodayRow แล้วไป map จาก logs ชุดเก่า ทำให้ต้องกด Out หลอก 1 ครั้งก่อน)
+    const existing = logs.find((l) => l.user === actingUser && l.date === today);
+    if (existing) {
+      if (existing.clock_in) return alert("วันนี้ clock in แล้ว");
+      setLogs(logs.map((l) => (l.id === existing.id ? { ...l, clock_in: now } : l)));
+      return;
+    }
+
+    const row = { id: safeId(), user: actingUser, date: today, clock_in: now, clock_out: "" };
+    setLogs([row, ...logs]);
   }
+
   function clockOut() {
     if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
     if (!actingUser) return alert("ต้องปลดล็อกก่อน");
@@ -614,6 +703,7 @@ const planKey = makePlanKey(planUser, weekStart);
                 <select
                   value={refDraft.mood}
                   onChange={(e) => setRefDraft((p) => ({ ...p, mood: e.target.value }))}
+                  disabled={!canEditSelf}
                   style={selSmall}
                 >
                   <option value="">เลือก mood</option>
@@ -630,6 +720,7 @@ const planKey = makePlanKey(planUser, weekStart);
                   value={refDraft.text}
                   onChange={(e) => setRefDraft((p) => ({ ...p, text: e.target.value }))}
                   rows={2}
+                  disabled={!canEditSelf}
                   style={{ ...inpSmall, height: "auto" }}
                   placeholder="วันนี้เรียนรู้อะไรเกี่ยวกับการทำงานบ้าง? / อะไรที่ทำได้ดี / อะไรที่อยากปรับ"
                 />
@@ -638,6 +729,7 @@ const planKey = makePlanKey(planUser, weekStart);
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                 <button
                   onClick={() => {
+                    if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
                     if (!planUser) return alert("ยังไม่มี owner");
                     const key = `${planUser}__${today}`;
                     const next = { ...(reflectionsStore || {}) };
@@ -646,6 +738,7 @@ const planKey = makePlanKey(planUser, weekStart);
                     alert("Saved ✅");
                   }}
                   style={btnXs}
+                  disabled={!canEditSelf}
                 >
                   Save
                 </button>

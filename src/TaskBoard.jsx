@@ -9,6 +9,9 @@ const TYPE_OPTIONS = ["routine", "add-on"];
 const STATUS_OPTIONS = ["ongoing", "not started", "done"];
 const SUPERVISORS = ["fah", "pluem", "namtip"];
 
+const TZ = "Asia/Bangkok";
+const LS_TASKBOARD_VIEW = "sdwf_taskboard_view_v1";
+
 const SUP_PENDING_MAX_H = 160;
 const SUP_FOLLOWUP_H = 320;
 const SUP_GAP = 10;
@@ -32,6 +35,90 @@ function setJSON(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+function projectCode(t) {
+  return (
+    t?.project_code ||
+    t?.projectCode ||
+    (typeof t?.project === "string" ? t.project : null) ||
+    null
+  );
+}
+
+function projectInstanceName(t) {
+  // Prefer explicit instance/name fields (Projectboard-created projects often have these)
+  const direct =
+    t?.project_instance_name ||
+    t?.projectInstanceName ||
+    t?.project_instance ||
+    t?.projectInstance ||
+    t?.project_name ||
+    t?.projectName ||
+    t?.project_title ||
+    t?.projectTitle ||
+    t?.workflow_name ||
+    t?.workflowName ||
+    t?.project_display_name ||
+    t?.projectDisplayName ||
+    t?.project_label ||
+    t?.projectLabel ||
+    null;
+
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+
+  // Some implementations store a nested object in `project`
+  if (t?.project && typeof t.project === "object") {
+    const o = t.project;
+    const nested =
+      o?.name || o?.title || o?.project_name || o?.projectName || o?.label || o?.display_name;
+    if (typeof nested === "string" && nested.trim()) return nested.trim();
+  }
+
+  // Heuristic fallback: try to infer from task text if it contains a project instance pattern.
+  // Example: "D-Camp14" / "D‑Camp14" / "D Camp14"
+  const hay = String(t?.task || "");
+  const m = hay.match(/\bD\s*[-‑–]?\s*Camp\s*\d+\b/i);
+  if (m) return m[0].replace(/\s+/g, "").replace(/[-‑–]?Camp/i, "-Camp");
+
+  return null;
+}
+
+function projectTag(t) {
+  const code = projectCode(t);
+  const name = projectInstanceName(t);
+
+  if (name && code && name.toLowerCase() !== code.toLowerCase()) return `${name} (${code})`;
+  return name || code || "";
+}
+
+function ymdFromDateInTZ(date) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(date);
+  } catch {
+    // fallback to local date
+    const d = new Date(date);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+  }
+}
+function utcDateFromYMD(ymdStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymdStr || "").trim());
+  if (!m) return new Date(Date.UTC(1970, 0, 1));
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+}
+function ymdFromUTCDate(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
 function newId() {
   try {
     return crypto.randomUUID();
@@ -52,17 +139,17 @@ function formatDate(ymd) {
 }
 
 function addDays(dateStr, days) {
-  const d = new Date(dateStr + "T00:00:00");
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const d = utcDateFromYMD(dateStr);
+  d.setUTCDate(d.getUTCDate() + days);
+  return ymdFromUTCDate(d);
 }
 
 function getWeekStartMonday(ymd) {
-  const d = new Date(`${ymd}T00:00:00`);
-  const day = d.getDay(); // 0 Sun..6 Sat
+  const d = utcDateFromYMD(ymd);
+  const day = d.getUTCDay(); // 0 Sun..6 Sat
   const diff = (day === 0 ? -6 : 1) - day;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
+  d.setUTCDate(d.getUTCDate() + diff);
+  return ymdFromUTCDate(d);
 }
 
 function followupPlan(assigned, deadline) {
@@ -220,7 +307,9 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     `}</style>
   );
 
-  const [viewPerson, setViewPerson] = useState(() => getSessionUser() || "meen");
+  const [viewPerson, setViewPerson] = useState(() => parseJSON(LS_TASKBOARD_VIEW, null) || getSessionUser() || "meen");
+
+  useEffect(() => setJSON(LS_TASKBOARD_VIEW, viewPerson), [viewPerson]);
 
   const [sortFollowupAsc, setSortFollowupAsc] = useState(true);
   const [sortRoutineAsc, setSortRoutineAsc] = useState(true);
@@ -575,14 +664,14 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
   }
 
   function ymd(d) {
-    return d.toISOString().slice(0, 10);
-  }
+  return ymdFromDateInTZ(d);
+}
 
   function addDaysYMD(ymdStr, n) {
-    const dt = new Date(ymdStr + "T00:00:00");
-    dt.setDate(dt.getDate() + n);
-    return ymd(dt);
-  }
+  const d = utcDateFromYMD(ymdStr);
+  d.setUTCDate(d.getUTCDate() + n);
+  return ymdFromUTCDate(d);
+}
 
   function minutesFromISO(iso) {
     if (!iso) return null;
@@ -1074,7 +1163,7 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
                           >
                             <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
                               <div style={taskSmall}><b>{t.task}</b></div>
-                              <div style={metaSmallDark}>{t.project} · {t.bu} · {t.type}</div>
+                              <div style={metaSmallDark}>{projectTag(t) || t.project} · {t.bu} · {t.type}</div>
                               <div style={{ marginLeft: "auto", fontSize: 12 }}>dl: <b>{formatDate(t.deadline)}</b></div>
                             </div>
 
@@ -1296,7 +1385,7 @@ function TaskList({ items, currentUser, expandedCard, setExpandedCard, onSetWork
                 }}
                 onClick={() => setExpandedCard((prev) => ({ ...prev, [t.id]: true }))}
               >
-                <div style={{ fontWeight: 800, fontSize: 12, flex: 1 }}>{t.task}</div>
+                <div style={{ fontWeight: 800, fontSize: 12, flex: 1 }}>{t.task}{projectTag(t) ? ` · ${projectTag(t)}` : ""}</div>
 
                 {!t.confirmed && (
                   <button
@@ -1323,7 +1412,7 @@ function TaskList({ items, currentUser, expandedCard, setExpandedCard, onSetWork
             <div key={t.id} className="sdwf-wrap" style={{ border: "1px solid #2b2b2b", borderRadius: 12, padding: 8, background: bg, color: fg }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <div style={{ fontWeight: 900, fontSize: 12 }}>{role}</div>
-                <div style={{ fontSize: 12, opacity: 0.9 }}>dl: <b>{formatDate(t.deadline)}</b></div>
+                <div style={{ fontSize: 12, opacity: 0.9 }}>dl: <b>{formatDate(t.deadline)}</b>{projectTag(t) ? ` · ${projectTag(t)}` : (t.project ? ` · ${t.project}` : "")}</div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "160px 140px", gap: 8 }}>
                   <input

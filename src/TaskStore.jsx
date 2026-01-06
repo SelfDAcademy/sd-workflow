@@ -208,7 +208,25 @@ async function ensureAuthenticated() {
       }
 
       if (!tRes.error) {
-        setTasks((prev) => mergeServerTasksPreservingPending(prev, tRes.data || []));
+        // ✅ เติมชื่อโปรเจกต์ instance (เช่น D-Camp14) ลงใน task ที่โหลดมา
+        // เพื่อให้หน้า TaskBoard แสดงผลได้ โดยไม่ต้องแก้ SQL/เพิ่มคอลัมน์ในตาราง tasks
+        const pMap = new Map();
+        for (const p of pRes.data || []) {
+          const pid = String(p?.project_id || p?.id || "");
+          if (!pid) continue;
+          const pname = p?.name ?? p?.title ?? p?.project_name ?? p?.projectTitle ?? "";
+          if (!pname) continue;
+          pMap.set(pid, pname);
+        }
+
+        const enriched = (tRes.data || []).map((t) => {
+          const pid = t?.project_id != null ? String(t.project_id) : "";
+          const pname = (t && (t.project_name || t.projectName || t.projectTitle)) || (pid ? pMap.get(pid) : "") || "";
+          // ไม่ทับค่าที่มีอยู่แล้ว แค่เติมเพิ่มสำหรับการแสดงผล
+          return pname ? { ...t, project_name: pname } : t;
+        });
+
+        setTasks((prev) => mergeServerTasksPreservingPending(prev, enriched));
       }
     }
 
