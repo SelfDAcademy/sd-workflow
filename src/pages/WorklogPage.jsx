@@ -635,7 +635,7 @@ const planKey = makePlanKey(planUser, weekStart);
     const diffDays = Math.floor((from.getTime() - now.getTime()) / 86400000);
     if (diffDays < 3) return alert("ลากิจต้องล่วงหน้าอย่างน้อย 3 วัน");
 
-    const req = { id: safeId(), user: actingUser, type: "leave", status: "pending", created_at: nowISO(), requested_for_day: leaveTargetDay, ...leaveForm, notify_to: "fah" };
+    const req = { id: safeId(), user: actingUser, type: "leave", status: "pending", created_at: nowISO(), requested_for_day: leaveTargetDay, ...leaveForm, notify_to: "all" };
     setLeaveRequests((prev) => [req, ...prev]);
 
     const next = JSON.parse(JSON.stringify(draftPlan));
@@ -650,7 +650,7 @@ const planKey = makePlanKey(planUser, weekStart);
     if (!canEditSelf) return alert("ดูของคนอื่นอยู่ แก้ไขไม่ได้");
     if (!actingUser) return alert("ต้องปลดล็อกก่อน");
     if (!sickForm.reason.trim()) return alert("กรุณาใส่เหตุผล/อาการป่วย");
-    const req = { id: safeId(), user: actingUser, type: "sick", status: "logged", created_at: nowISO(), ...sickForm, notify_to: "fah" };
+    const req = { id: safeId(), user: actingUser, type: "sick", status: "pending", created_at: nowISO(), ...sickForm, notify_to: "all" };
     setLeaveRequests((prev) => [req, ...prev]);
     setSickOpen(false);
     alert("บันทึกลาป่วยแล้ว");
@@ -1071,7 +1071,7 @@ const planKey = makePlanKey(planUser, weekStart);
               <button onClick={() => {
                 if (!actingUser) return alert("ต้องปลดล็อกก่อน");
                 if (!sickForm.reason.trim()) return alert("กรุณาใส่เหตุผล/อาการป่วย");
-                const req = { id: safeId(), user: actingUser, type: "sick", status: "logged", created_at: nowISO(), ...sickForm, notify_to: "fah" };
+                const req = { id: safeId(), user: actingUser, type: "sick", status: "pending", created_at: nowISO(), ...sickForm, notify_to: "all" };
                 setLeaveRequests((prev) => [req, ...prev]);
                 setSickOpen(false);
               }} style={btnWarnSm}>Submit</button>

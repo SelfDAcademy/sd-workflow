@@ -362,9 +362,14 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     return () => clearInterval(id);
   }, []);
 
-  const pendingLeaveForFah = useMemo(() => {
-    if (currentUser !== "fah") return [];
-    return (leaveRequests || []).filter((r) => r.type === "leave" && r.status === "pending" && r.notify_to === "fah");
+  const pendingLeaveForSupervisor = useMemo(() => {
+    if (!SUPERVISORS.includes(currentUser)) return [];
+    return (leaveRequests || []).filter((r) => {
+      const typeOk = r.type === "leave" || r.type === "sick";
+      const statusOk = r.status === "pending";
+      const notifyOk = r.notify_to === currentUser || r.notify_to === "all" || !r.notify_to;
+      return typeOk && statusOk && notifyOk;
+    });
   }, [leaveRequests, currentUser]);
 
   function confirmLeaveRequest(reqId) {
@@ -377,28 +382,59 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
     setJSON(LS_LEAVE_REQUESTS, list);
     setLeaveRequests(list);
 
-    // also patch weekly plan day note to confirmed (so Worklog shows confirmed)
-    const planStore = parseJSON(LS_WEEKLY_PLAN, {});
-    const weekStart = getWeekStartMonday(req.requested_for_day || req.from_date);
-    const planKey = `${req.user}__${weekStart}`;
-    const plan = planStore?.[planKey];
-    if (plan?.days?.[req.requested_for_day]) {
-      planStore[planKey] = {
-        ...plan,
-        days: {
-          ...plan.days,
-          [req.requested_for_day]: {
-            ...plan.days[req.requested_for_day],
-            note: "confirmed",
-            leave_req_id: req.id,
-            type: "leave",
-          },
-        },
-      };
-      setJSON(LS_WEEKLY_PLAN, planStore);
-    }
+// ✅ Auto adjust plan table on confirm:
+// - Apply to ALL days in the request range (from_date..to_date inclusive)
+// - Works for both business leave (type: leave) and sick leave (type: sick)
+// - Writes into LS_WEEKLY_PLAN so Worklog plan table reflects immediately
+try {
+  const planStore = parseJSON(LS_WEEKLY_PLAN, {});
+  const type = req.type === "sick" ? "sick" : "leave";
+  const fromDay = req.from_date || req.requested_for_day;
+  const toDay = req.to_date || req.from_date || req.requested_for_day;
 
-    alert("ยืนยันคำขอลากิจแล้ว ✅");
+  const startDay = fromDay || "";
+  const endDay = toDay || startDay;
+
+  // enumerate days (max 31 to prevent accidental huge loops)
+  const days = [];
+  if (startDay) {
+    for (let i = 0; i < 31; i++) {
+      const d = i === 0 ? startDay : addDays(startDay, i);
+      days.push(d);
+      if (d === endDay) break;
+      if (d > endDay) break;
+    }
+  }
+
+  for (const dayYMD of days) {
+    const ws = getWeekStartMonday(dayYMD);
+    const planKey = `${req.user}__${ws}`;
+    const plan = planStore?.[planKey] || { locked: false, locked_at: "", days: {} };
+    const prevDay = plan.days?.[dayYMD] || {};
+
+    planStore[planKey] = {
+      ...plan,
+      days: {
+        ...(plan.days || {}),
+        [dayYMD]: {
+          ...prevDay,
+          type: "leave",          // keep plan table consistent (your plan table knows "leave")
+          note: "confirmed",      // reflect confirmed state
+          leave_req_id: req.id,   // link back
+          start: "",              // leave clears work time
+          end: "",
+          // keep existing day_tasks if any (do not overwrite)
+          day_tasks: Array.isArray(prevDay.day_tasks) ? prevDay.day_tasks : (prevDay.day_tasks || []),
+        },
+      },
+    };
+  }
+
+  setJSON(LS_WEEKLY_PLAN, planStore);
+} catch {}
+
+alert("ยืนยันคำขอลาแล้ว ✅");
+
   }
 
   // ✅ helpers for clear-confirmed (deadline key + month range)
@@ -1082,14 +1118,14 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
             <Panel title="Pending confirmations" minimized={minPending} onToggle={() => setMinPending((v) => !v)} headerTight>
               {!minPending && (
                 <div style={{ maxHeight: SUP_PENDING_MAX_H - 44, overflowY: "auto", paddingRight: 4 }}>
-                  {currentUser === "fah" && pendingLeaveForFah.length > 0 && (
+                  {currentUser === "fah" && pendingLeaveForSupervisor.length > 0 && (
                     <div style={{ marginBottom: 10 }}>
                       <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, opacity: 0.9 }}>
                         Leave requests (from Worklog)
                       </div>
 
                       <div style={{ display: "grid", gap: 8 }}>
-                        {pendingLeaveForFah.map((r) => (
+                        {pendingLeaveForSupervisor.map((r) => (
                           <div key={r.id} className="sdwf-wrap" style={cardPending}>
                             <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
                               <div style={taskSmall}><b>leave request</b></div>
