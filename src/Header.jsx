@@ -1,7 +1,9 @@
+// src/Header.jsx
 import { NavLink, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { supabase } from "./supabaseClient";
 import { getSessionUser, signOut } from "./auth/auth";
+import { isMyRoleSupervisor } from "./services/profileService";
 
 function Header() {
   const navigate = useNavigate();
@@ -15,18 +17,38 @@ function Header() {
     return "";
   });
 
+  // ✅ NEW: show Logs tab only for supervisor
+  const [isSupervisor, setIsSupervisor] = useState(false);
+
   useEffect(() => {
     let mounted = true;
 
-    async function syncNow() {
+    async function syncNow(passedSession) {
       if (!supabase) {
-        if (mounted) setUser(getSessionUser());
+        if (mounted) {
+          setUser(getSessionUser());
+          setIsSupervisor(false);
+        }
         return;
       }
-      // Prefer real session user from Supabase
-      const { data } = await supabase.auth.getSession();
-      const email = data?.session?.user?.email || "";
+
+      const session =
+        passedSession ?? (await supabase.auth.getSession()).data?.session;
+
+      const email = session?.user?.email || "";
       if (mounted) setUser(email);
+
+      if (!session?.user) {
+        if (mounted) setIsSupervisor(false);
+        return;
+      }
+
+      try {
+        const ok = await isMyRoleSupervisor();
+        if (mounted) setIsSupervisor(Boolean(ok));
+      } catch {
+        if (mounted) setIsSupervisor(false);
+      }
     }
 
     syncNow();
@@ -34,8 +56,8 @@ function Header() {
     const { data: sub } =
       supabase?.auth.onAuthStateChange((_event, session) => {
         if (!mounted) return;
-        const email = session?.user?.email || "";
-        setUser(email);
+        // sync user + role
+        syncNow(session);
       }) || { data: null };
 
     return () => {
@@ -58,6 +80,7 @@ function Header() {
       await signOut();
     } finally {
       setUser("");
+      setIsSupervisor(false);
       navigate("/login", { replace: true });
     }
   }
@@ -92,9 +115,23 @@ function Header() {
         <NavLink to="/worklog" style={linkStyle}>
           Worklog
         </NavLink>
+
+        {/* Supervisor only */}
+        {isSupervisor ? (
+          <NavLink to="/logs" style={linkStyle}>
+            Logs
+          </NavLink>
+        ) : null}
       </nav>
 
-      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+      <div
+        style={{
+          marginLeft: "auto",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
         <div style={{ fontSize: 12, color: "#e5e7eb", opacity: 0.9 }}>
           {user ? `login as: ${user}` : ""}
         </div>

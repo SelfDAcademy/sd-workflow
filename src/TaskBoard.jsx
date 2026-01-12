@@ -1,7 +1,10 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { PEOPLE } from "./config";
 import { getSessionUser } from "./auth/auth";
-
+import { supabase } from "./supabaseClient";
+import { listProfiles } from "./services/profileService";
+import { listLeaveRequests, confirmLeaveRequest as confirmLeaveRequestDB } from "./services/leaveService";
+import { getWeeklyPlan, upsertWeeklyPlan } from "./services/worklogService";
 
 const BU_OPTIONS = ["BU1", "BU2", "comp."];
 const PROJECT_OPTIONS = ["DC", "DS", "DCP", "DCR", "SDJ", "SDF", "1:1", "SC", "comp."];
@@ -17,9 +20,6 @@ const SUP_FOLLOWUP_H = 320;
 const SUP_GAP = 10;
 const SUP_TOP_H = SUP_PENDING_MAX_H + SUP_GAP + SUP_FOLLOWUP_H;
 
-// 🔗 must match WorklogPage storage keys
-const LS_LEAVE_REQUESTS = "sdwf_leave_requests_v2";
-const LS_WEEKLY_PLAN = "sdwf_weekly_plan_v3";
 
 function parseJSON(key, fallback) {
   try {
@@ -107,6 +107,50 @@ function ymdFromDateInTZ(date) {
     return `${y}-${m}-${dd}`;
   }
 }
+function hhmmInTZFromISO(iso) {
+  if (!iso) return null;
+
+  const raw = String(iso).trim();
+  const hasZone =
+    /[zZ]$/.test(raw) ||
+    /[+-]\d{2}:?\d{2}$/.test(raw) ||
+    /[+-]\d{2}$/.test(raw);
+
+  const normalized = (() => {
+    const t = raw.includes(" ") && !raw.includes("T") ? raw.replace(" ", "T") : raw;
+    return hasZone ? t : `${t}Z`;
+  })();
+
+  try {
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) return null;
+
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: TZ,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(dt);
+
+    const h = Number(parts.find((p) => p.type === "hour")?.value);
+    const m = Number(parts.find((p) => p.type === "minute")?.value);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    return { h, m };
+  } catch {
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) return null;
+    const h = (dt.getUTCHours() + 7) % 24;
+    const m = dt.getUTCMinutes();
+    return { h, m };
+  }
+}
+
+function minutesFromISOInTZ(iso) {
+  const t = hhmmInTZFromISO(iso);
+  if (!t) return null;
+  return t.h * 60 + t.m;
+}
+
 function utcDateFromYMD(ymdStr) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymdStr || "").trim());
   if (!m) return new Date(Date.UTC(1970, 0, 1));
@@ -355,86 +399,185 @@ export default function TaskBoard({ tasks = [], addTask, updateTask }) {
   const [minProfile, setMinProfile] = useState(false);
   const [minRemarks, setMinRemarks] = useState(false);
 
-  // --- LEAVE REQUESTS: read from localStorage + keep in state ---
-  const [leaveRequests, setLeaveRequests] = useState(() => parseJSON(LS_LEAVE_REQUESTS, []));
+    // --- TEAM PROFILES (Supabase) ---
+  const [teamProfiles, setTeamProfiles] = useState([]);
+  const [teamProfilesError, setTeamProfilesError] = useState("");
+
   useEffect(() => {
-    const id = setInterval(() => setLeaveRequests(parseJSON(LS_LEAVE_REQUESTS, [])), 800);
-    return () => clearInterval(id);
+    let alive = true;
+    (async () => {
+      try {
+        const all = await listProfiles({ orderBy: "username", ascending: true });
+        if (!alive) return;
+        setTeamProfiles(Array.isArray(all) ? all : []);
+        setTeamProfilesError("");
+      } catch (e) {
+        if (!alive) return;
+        setTeamProfiles([]);
+        setTeamProfilesError(e?.message || String(e));
+      }
+    })();
+    return () => { alive = false; };
   }, []);
+
+  const idToUsername = useMemo(() => {
+    const m = {};
+    for (const p of teamProfiles || []) m[p.id] = p.username;
+    return m;
+  }, [teamProfiles]);
+
+  const usernameToId = useMemo(() => {
+    const m = {};
+    for (const p of teamProfiles || []) m[p.username] = p.id;
+    return m;
+  }, [teamProfiles]);
+
+  // --- LEAVE REQUESTS: read from Supabase ---
+  const [leaveRequests, setLeaveRequests] = useState([]);
+  const [leaveLoading, setLeaveLoading] = useState(false);
+  const [leaveError, setLeaveError] = useState("");
+  const [confirmingLeaveId, setConfirmingLeaveId] = useState("");
+
+  const fetchLeaveRequestsOnce = async () => {
+    if (!isSupervisor) return;
+
+    setLeaveLoading(true);
+    setLeaveError("");
+
+    try {
+      const todayYMD = ymdFromDateInTZ(new Date());
+      const rows = await listLeaveRequests({
+        status: "pending",
+        from: addDays(todayYMD, -365),
+        to: addDays(todayYMD, 365),
+        limit: 200,
+        orderBy: "created_at",
+        ascending: false,
+      });
+
+      const enriched = (rows || []).map((r) => ({
+        ...r,
+        user: idToUsername?.[r.user_id] || String(r.user_id || "").slice(0, 8) || "unknown",
+      }));
+
+      setLeaveRequests(enriched);
+    } catch (e) {
+      setLeaveRequests([]);
+      setLeaveError(e?.message || String(e));
+    } finally {
+      setLeaveLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isSupervisor) {
+      setLeaveRequests([]);
+      setLeaveError("");
+      setLeaveLoading(false);
+      return;
+    }
+
+    let alive = true;
+
+    const run = async () => {
+      if (!alive) return;
+      await fetchLeaveRequestsOnce();
+    };
+
+    run();
+    const id = setInterval(run, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSupervisor, currentUser, idToUsername]);
 
   const pendingLeaveForSupervisor = useMemo(() => {
     if (!SUPERVISORS.includes(currentUser)) return [];
     return (leaveRequests || []).filter((r) => {
-      const typeOk = r.type === "leave" || r.type === "sick";
+      const typeOk = r.leave_type === "business" || r.leave_type === "sick" || r.leave_type === "other";
       const statusOk = r.status === "pending";
       const notifyOk = r.notify_to === currentUser || r.notify_to === "all" || !r.notify_to;
       return typeOk && statusOk && notifyOk;
     });
   }, [leaveRequests, currentUser]);
 
-  function confirmLeaveRequest(reqId) {
-    const list = parseJSON(LS_LEAVE_REQUESTS, []);
-    const idx = list.findIndex((r) => r.id === reqId);
-    if (idx < 0) return alert("หา leave request ไม่เจอ");
+  async function applyConfirmedLeaveToWeeklyPlans(req) {
+    if (!req?.user_id) return;
 
-    const req = list[idx];
-    list[idx] = { ...req, status: "confirmed", confirmed_at: new Date().toISOString(), confirmed_by: currentUser };
-    setJSON(LS_LEAVE_REQUESTS, list);
-    setLeaveRequests(list);
+    const fromDay = req.from_date || req.requested_for_day;
+    const toDay = req.to_date || req.from_date || req.requested_for_day;
+    if (!fromDay || !toDay) return;
 
-// ✅ Auto adjust plan table on confirm:
-// - Apply to ALL days in the request range (from_date..to_date inclusive)
-// - Works for both business leave (type: leave) and sick leave (type: sick)
-// - Writes into LS_WEEKLY_PLAN so Worklog plan table reflects immediately
-try {
-  const planStore = parseJSON(LS_WEEKLY_PLAN, {});
-  const type = req.type === "sick" ? "sick" : "leave";
-  const fromDay = req.from_date || req.requested_for_day;
-  const toDay = req.to_date || req.from_date || req.requested_for_day;
+    const startDay = fromDay <= toDay ? fromDay : toDay;
+    const endDay = fromDay <= toDay ? toDay : fromDay;
 
-  const startDay = fromDay || "";
-  const endDay = toDay || startDay;
-
-  // enumerate days (max 31 to prevent accidental huge loops)
-  const days = [];
-  if (startDay) {
-    for (let i = 0; i < 31; i++) {
+    // enumerate days (cap)
+    const days = [];
+    for (let i = 0; i < 62; i++) {
       const d = i === 0 ? startDay : addDays(startDay, i);
       days.push(d);
       if (d === endDay) break;
       if (d > endDay) break;
     }
-  }
 
-  for (const dayYMD of days) {
-    const ws = getWeekStartMonday(dayYMD);
-    const planKey = `${req.user}__${ws}`;
-    const plan = planStore?.[planKey] || { locked: false, locked_at: "", days: {} };
-    const prevDay = plan.days?.[dayYMD] || {};
+    // group by week start
+    const byWeek = {};
+    for (const dayYMD of days) {
+      const ws = getWeekStartMonday(dayYMD);
+      if (!byWeek[ws]) byWeek[ws] = [];
+      byWeek[ws].push(dayYMD);
+    }
 
-    planStore[planKey] = {
-      ...plan,
-      days: {
-        ...(plan.days || {}),
-        [dayYMD]: {
+    for (const [ws, dayList] of Object.entries(byWeek)) {
+      const plan = await getWeeklyPlan(req.user_id, ws);
+      const prevDays = (plan?.days && typeof plan.days === "object" && !Array.isArray(plan.days)) ? plan.days : {};
+      const nextDays = { ...prevDays };
+
+      for (const dayYMD of dayList) {
+        const prevDay = nextDays?.[dayYMD] || {};
+        nextDays[dayYMD] = {
           ...prevDay,
-          type: "leave",          // keep plan table consistent (your plan table knows "leave")
-          note: "confirmed",      // reflect confirmed state
-          leave_req_id: req.id,   // link back
-          start: "",              // leave clears work time
+          type: "leave",
+          note: "confirmed",
+          leave_req_id: req.id,
+          start: "",
           end: "",
-          // keep existing day_tasks if any (do not overwrite)
-          day_tasks: Array.isArray(prevDay.day_tasks) ? prevDay.day_tasks : (prevDay.day_tasks || []),
-        },
-      },
-    };
+          day_tasks: Array.isArray(prevDay.day_tasks) ? prevDay.day_tasks : [],
+        };
+      }
+
+      await upsertWeeklyPlan({
+        user_id: req.user_id,
+        week_start: ws,
+        days: nextDays,
+        locked: Boolean(plan?.locked),
+        locked_at: plan?.locked_at ?? null,
+      });
+    }
   }
 
-  setJSON(LS_WEEKLY_PLAN, planStore);
-} catch {}
+  async function confirmLeaveRequest(reqId) {
+    if (!isSupervisor) return alert("เฉพาะ Supervisor");
 
-alert("ยืนยันคำขอลาแล้ว ✅");
+    const req = (leaveRequests || []).find((r) => r.id === reqId);
+    if (!req) return alert("หา leave request ไม่เจอ");
 
+    try {
+      setConfirmingLeaveId(reqId);
+      const confirmed = await confirmLeaveRequestDB(reqId);
+
+      // ✅ Apply to plan table on confirm (DB)
+      await applyConfirmedLeaveToWeeklyPlans(confirmed || req);
+
+      await fetchLeaveRequestsOnce();
+      alert("ยืนยันคำขอลาแล้ว ✅");
+    } catch (e) {
+      alert(e?.message || String(e));
+    } finally {
+      setConfirmingLeaveId("");
+    }
   }
 
   // ✅ helpers for clear-confirmed (deadline key + month range)
@@ -684,37 +827,15 @@ alert("ยืนยันคำขอลาแล้ว ✅");
 
   const profileRole = isSupervisor ? "Supervisor" : "Team";
 
-  // ✅ Profile popup: read Worklog data + compute weekly stats, yearly leave, badges & stars (weekly refresh)
-  const WORKLOG_KEYS = {
-    LOGS: ["sdwf_worklog_logs_v3", "sdwf_worklog_logs_v2"],
-    WEEKLY_PLAN: ["sdwf_weekly_plan_v3", "sdwf_weekly_plan_v2"],
-    LEAVES: ["sdwf_leave_requests_v2", "sdwf_leave_requests_v1"],
-  };
-
-  function readFirstLS(keys, fallback) {
-    for (const k of keys) {
-      const v = parseJSON(k, null);
-      if (v !== null && v !== undefined) return v;
-    }
-    return fallback;
+    // ✅ Profile popup: read Worklog data from Supabase + compute weekly stats, yearly leave, badges & stars (weekly refresh)
+  function ymd(d) {
+    return ymdFromDateInTZ(d);
   }
 
-  function ymd(d) {
-  return ymdFromDateInTZ(d);
-}
-
   function addDaysYMD(ymdStr, n) {
-  const d = utcDateFromYMD(ymdStr);
-  d.setUTCDate(d.getUTCDate() + n);
-  return ymdFromUTCDate(d);
-}
-
-  function minutesFromISO(iso) {
-    if (!iso) return null;
-    const hh = Number(String(iso).slice(11, 13));
-    const mm = Number(String(iso).slice(14, 16));
-    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
-    return hh * 60 + mm;
+    const d = utcDateFromYMD(ymdStr);
+    d.setUTCDate(d.getUTCDate() + n);
+    return ymdFromUTCDate(d);
   }
 
   function minutesBetweenHHMM(a, b) {
@@ -736,49 +857,151 @@ alert("ยืนยันคำขอลาแล้ว ✅");
     pluem: "CEO",
   };
 
+  const worklogUserId = usernameToId?.[currentUser] || null;
+  const [worklogBase, setWorklogBase] = useState(null);
+  const [worklogBaseError, setWorklogBaseError] = useState("");
+
+  useEffect(() => {
+    if (isOverview) {
+      setWorklogBase(null);
+      setWorklogBaseError("");
+      return;
+    }
+
+    let alive = true;
+
+    const run = async () => {
+      try {
+        const today = new Date();
+        const todayYMD = ymd(today);
+        const weekStart = getWeekStartMonday(todayYMD);
+        const weekDays = Array.from({ length: 7 }, (_, i) => addDaysYMD(weekStart, i));
+        const weekEnd = addDaysYMD(weekStart, 6);
+
+        // If we don't know user_id (profiles not loaded), show zeros
+        if (!worklogUserId) {
+          if (!alive) return;
+          setWorklogBase({
+            weekStart,
+            weekDays,
+            clockInDays: 0,
+            clockOutDays: 0,
+            missedOut: 0,
+            lateCount: 0,
+            year: today.getFullYear(),
+            sickDays: 0,
+            leaveDays: 0,
+          });
+          setWorklogBaseError(teamProfilesError ? `profiles: ${teamProfilesError}` : "");
+          return;
+        }
+
+        // logs this week
+        const { data: logsData, error: logsErr } = await supabase
+          .from("worklog_logs")
+          .select("log_date,clock_in,clock_out")
+          .eq("user_id", worklogUserId)
+          .gte("log_date", weekStart)
+          .lte("log_date", weekEnd);
+
+        if (logsErr) throw logsErr;
+        const logs = Array.isArray(logsData) ? logsData : [];
+
+        // plan this week
+        const { data: planRow, error: planErr } = await supabase
+          .from("weekly_plans")
+          .select("days")
+          .eq("user_id", worklogUserId)
+          .eq("week_start", weekStart)
+          .maybeSingle();
+
+        if (planErr) throw planErr;
+        const weekPlan = (planRow?.days && typeof planRow.days === "object" && !Array.isArray(planRow.days))
+          ? planRow.days
+          : {};
+
+        // weekly attendance stats
+        let clockInDays = 0;
+        let clockOutDays = 0;
+        let missedOut = 0;
+        let lateCount = 0;
+
+        for (const d of weekDays) {
+          const log = logs.find((x) => x?.log_date === d);
+          if (log?.clock_in) clockInDays += 1;
+          if (log?.clock_out) clockOutDays += 1;
+          if (log?.clock_in && !log?.clock_out) missedOut += 1;
+
+          // late check (only if plan says work and has start)
+          const plan = weekPlan?.[d];
+          if (plan?.type === "work" && plan?.start && log?.clock_in) {
+            const planned = minutesBetweenHHMM("00:00", plan.start);
+            const actual = minutesFromISOInTZ(log.clock_in);
+            if (planned !== null && actual !== null && actual - planned > 5) lateCount += 1;
+          }
+        }
+
+        // yearly leave stats (count requests in current year)
+        const year = today.getFullYear();
+        const from = `${year}-01-01`;
+        const to = `${year}-12-31`;
+
+        const { data: leaveRows, error: leaveErr } = await supabase
+          .from("leave_requests")
+          .select("leave_type,from_date")
+          .eq("user_id", worklogUserId)
+          .gte("from_date", from)
+          .lte("from_date", to);
+
+        if (leaveErr) throw leaveErr;
+
+        const sickDays = (leaveRows || []).filter((x) => x?.leave_type === "sick").length;
+        const leaveDays = (leaveRows || []).filter((x) => x?.leave_type === "business").length;
+
+        if (!alive) return;
+
+        setWorklogBase({
+          weekStart,
+          weekDays,
+          clockInDays,
+          clockOutDays,
+          missedOut,
+          lateCount,
+          year,
+          sickDays,
+          leaveDays,
+        });
+        setWorklogBaseError("");
+      } catch (e) {
+        if (!alive) return;
+        setWorklogBaseError(e?.message || String(e));
+      }
+    };
+
+    run();
+    const id = setInterval(run, 30000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [isOverview, currentUser, worklogUserId, teamProfilesError]);
+
   const worklogData = useMemo(() => {
     if (isOverview) return null;
 
-    const logs = readFirstLS(WORKLOG_KEYS.LOGS, []);
-    const plans = readFirstLS(WORKLOG_KEYS.WEEKLY_PLAN, {});
-    const leaves = readFirstLS(WORKLOG_KEYS.LEAVES, []);
-
     const today = new Date();
     const todayYMD = ymd(today);
-    const weekStart = getWeekStartMonday(todayYMD);
-    const weekDays = Array.from({ length: 7 }, (_, i) => addDaysYMD(weekStart, i));
 
-    const userLogs = Array.isArray(logs) ? logs.filter((x) => x?.user === currentUser && weekDays.includes(x?.date)) : [];
-    const keyThisWeek = `${currentUser}__${weekStart}`;
-    const weekPlan = plans?.[keyThisWeek]?.days || {};
+    const weekStart = worklogBase?.weekStart || getWeekStartMonday(todayYMD);
+    const weekDays = worklogBase?.weekDays || Array.from({ length: 7 }, (_, i) => addDaysYMD(weekStart, i));
 
-    // weekly attendance stats
-    let clockInDays = 0;
-    let clockOutDays = 0;
-    let missedOut = 0;
-    let lateCount = 0;
-
-    for (const d of weekDays) {
-      const log = userLogs.find((x) => x?.date === d);
-      if (log?.clock_in) clockInDays += 1;
-      if (log?.clock_out) clockOutDays += 1;
-      if (log?.clock_in && !log?.clock_out) missedOut += 1;
-
-      // late check (only if plan says work and has start)
-      const plan = weekPlan?.[d];
-      if (plan?.type === "work" && plan?.start && log?.clock_in) {
-        const planned = minutesBetweenHHMM("00:00", plan.start);
-        const actual = minutesFromISO(log.clock_in);
-        if (planned !== null && actual !== null && actual - planned > 5) lateCount += 1;
-      }
-    }
-
-    // yearly leave stats (count leave requests in current year)
-    const year = today.getFullYear();
-    const userLeaves = Array.isArray(leaves) ? leaves.filter((x) => x?.user === currentUser) : [];
-    const leavesThisYear = userLeaves.filter((x) => String(x?.from_date || "").startsWith(String(year)));
-    const sickDays = leavesThisYear.filter((x) => x?.type === "sick").length;
-    const leaveDays = leavesThisYear.filter((x) => x?.type === "leave").length;
+    const clockInDays = worklogBase?.clockInDays ?? 0;
+    const clockOutDays = worklogBase?.clockOutDays ?? 0;
+    const missedOut = worklogBase?.missedOut ?? 0;
+    const lateCount = worklogBase?.lateCount ?? 0;
+    const year = worklogBase?.year ?? today.getFullYear();
+    const sickDays = worklogBase?.sickDays ?? 0;
+    const leaveDays = worklogBase?.leaveDays ?? 0;
 
     // weekly badge from Tasks + Worklog
     // 기준: 지난주 (weekStart - 7) ~ (weekStart - 1)
@@ -792,7 +1015,12 @@ alert("ยืนยันคำขอลาแล้ว ✅");
     const confirmedDoneAsDoer = tasksLive.filter((t) => t?.confirmed && t?.doer === currentUser && inLastWeek(t)).length;
     const confirmedDoneAsSupport = tasksLive.filter((t) => t?.confirmed && t?.support === currentUser && inLastWeek(t)).length;
 
-    const activeLoad = tasksLive.filter((t) => !t?.confirmed && t?.status !== "done" && (t?.doer === currentUser || t?.support === currentUser)).length;
+    const activeLoad = tasksLive.filter(
+      (t) =>
+        !t?.confirmed &&
+        t?.status !== "done" &&
+        (t?.doer === currentUser || t?.support === currentUser)
+    ).length;
 
     // badges
     const badges = [];
@@ -833,6 +1061,7 @@ alert("ยืนยันคำขอลาแล้ว ✅");
       badges,
       stars,
       roleTitle: ROLE_TITLE[currentUser] || "Team",
+      _err: worklogBaseError || "",
     };
 
     // store once per week after Monday 06:00
@@ -841,7 +1070,7 @@ alert("ยืนยันคำขอลาแล้ว ✅");
     }
 
     return computed;
-  }, [isOverview, currentUser, tasksLive]);
+  }, [isOverview, currentUser, tasksLive, worklogBase, worklogBaseError]);
 
   // Monthly recap popup (show once per month after 06:00 on day 1)
   useEffect(() => {
@@ -1129,9 +1358,9 @@ alert("ยืนยันคำขอลาแล้ว ✅");
                           <div key={r.id} className="sdwf-wrap" style={cardPending}>
                             <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
                               <div style={taskSmall}><b>leave request</b></div>
-                              <div style={metaSmall}>user:{r.user} · day:{r.requested_for_day}</div>
+                              <div style={metaSmall}>user:{r.user} · day:{r.requested_for_day || r.from_date}</div>
                               <div style={{ marginLeft: "auto" }}>
-                                <button onClick={() => confirmLeaveRequest(r.id)} style={btnSmall}>Confirm</button>
+                                <button onClick={() => confirmLeaveRequest(r.id)} style={btnSmall} disabled={confirmingLeaveId === r.id || leaveLoading}>Confirm</button>
                               </div>
                             </div>
                             <div style={{ marginTop: 4, fontSize: 12, opacity: 0.9 }}>

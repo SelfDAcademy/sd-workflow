@@ -1,6 +1,12 @@
 import { useMemo, useState, useEffect } from "react";
 import { useTasks } from "../TaskStore";
 import { PEOPLE } from "../config";
+import {
+  getProjectTickMeta,
+  setProjectTickExtraDays,
+  listProjectTickCells,
+  upsertProjectTickCell,
+} from "../services/projectTicksService";
 
 /*
 แก้ตามที่ฟ้าขอ (เฉพาะประเด็น):
@@ -11,10 +17,12 @@ import { PEOPLE } from "../config";
 5) tickbox แสดงทุกวันตั้งแต่ start_date -> event_date และมี "+" หลัง event_date เพื่อเพิ่มวันเผื่อเลื่อนแผน (จนถึง end ของโปรเจกต์)
 6) kind=DC เลือก event date ได้ด้วย
 7) recheck syntax/ไม่ให้ error import ./config (ใช้ ../config)
-*/
 
-const LS_PROJECT_TICKS = "sdwf_project_ticks_v2";
-const LS_PROJECT_OWNERS = "sdwf_project_owners_v1";
+Phase 3.3/3.4:
+- ย้าย tick state + extraDays จาก localStorage -> Supabase:
+  - project_tick_meta.extra_days
+  - project_tick_cells (project_id, task_id, tick_date) => state 0/1/2
+*/
 
 function fmtDM(ymd) {
   if (!ymd) return "-";
@@ -50,21 +58,6 @@ function dayRange(startYmd, endYmd) {
   return out;
 }
 
-
-function parseJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    const v = JSON.parse(raw);
-    return v ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-function setJSON(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
-
 function getProjectEnd(project, tasks) {
   const ends = tasks.map((t) => t.deadline || t.due_date || t.dueDate).filter(Boolean);
   if (ends.length > 0) {
@@ -72,6 +65,13 @@ function getProjectEnd(project, tasks) {
     return ends[ends.length - 1];
   }
   return project.event_date || project.eventDate || project.start_date || project.startDate;
+}
+
+function normalizeProjectId(project) {
+  // สำคัญ: tick cells ใน Supabase อ้าง FK ไปที่ projects.project_id
+  // ในบางเคส project.id เป็น local id (ฝั่ง store) ที่ไม่มีใน DB → จะทำให้ FK fail
+  // ดังนั้นให้ prefer project_id ก่อนเสมอ
+  return project?.project_id || project?.projectId || project?.projectID || project?.id || "";
 }
 
 function Field({ label, children }) {
@@ -113,6 +113,8 @@ function TickButton({ value, onClick }) {
 }
 
 function ProjectTickTable({ project, tasks, updateTask }) {
+  const projectId = useMemo(() => String(normalizeProjectId(project) || ""), [project]);
+
   const startYmd = project.start_date || project.startDate || project.start;
   const endYmd = getProjectEnd(project, tasks);
   const eventYmd = project.event_date || project.eventDate || endYmd || startYmd;
@@ -125,38 +127,125 @@ function ProjectTickTable({ project, tasks, updateTask }) {
     return dayRange(next, endYmd);
   }, [eventYmd, endYmd]);
 
-  const [store, setStore] = useState(() => parseJSON(LS_PROJECT_TICKS, {}));
-  useEffect(() => setJSON(LS_PROJECT_TICKS, store), [store]);
+  const taskIds = useMemo(() => (tasks || []).map((t) => t?.id).filter(Boolean), [tasks]);
+  const taskIdsKey = useMemo(() => taskIds.join(","), [taskIds]);
 
-  const state = store[project.id] || { extraDays: 0, ticks: {} };
-  const extraDays = Math.max(0, Math.min(state.extraDays || 0, tailDays.length));
-  const shownDays = [...baseDays, ...tailDays.slice(0, extraDays)];
-  const canAdd = extraDays < tailDays.length;
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [extraDays, setExtraDays] = useState(0);
+  const [ticksByTask, setTicksByTask] = useState({}); // { [taskId]: { [ymd]: state } }
 
-  function toggleTick(taskId, day) {
-    setStore((prev) => {
-      const next = { ...prev };
-      const p = next[project.id] ? { ...next[project.id] } : { extraDays: 0, ticks: {} };
-      const ticks = p.ticks ? { ...p.ticks } : {};
-      const row = ticks[taskId] ? { ...ticks[taskId] } : {};
-      const cur = Number(row[day] || 0); const nxt = cur === 0 ? 1 : cur === 1 ? 2 : 0; row[day] = nxt;
-      ticks[taskId] = row;
-      p.ticks = ticks;
-      p.extraDays = typeof p.extraDays === "number" ? p.extraDays : 0;
-      next[project.id] = p;
+  const safeExtraDays = Math.max(0, Math.min(Number(extraDays || 0), tailDays.length));
+  const shownDays = [...baseDays, ...tailDays.slice(0, safeExtraDays)];
+  const canAdd = safeExtraDays < tailDays.length;
+
+  // Load meta + cells from DB
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      if (!projectId || !startYmd || !endYmd) {
+        if (!alive) return;
+        setExtraDays(0);
+        setTicksByTask({});
+        setError("");
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+
+      try {
+        const [meta, cells] = await Promise.all([
+          getProjectTickMeta(projectId),
+          taskIds.length > 0
+            ? listProjectTickCells(projectId, { from: startYmd, to: endYmd, taskIds })
+            : Promise.resolve([]),
+        ]);
+
+        if (!alive) return;
+
+        setExtraDays(Number(meta?.extra_days || 0));
+
+        const map = {};
+        for (const c of cells || []) {
+          const tid = String(c.task_id || "");
+          const d = c.tick_date;
+          if (!tid || !d) continue;
+          if (!map[tid]) map[tid] = {};
+          map[tid][d] = Number(c.state || 0);
+        }
+        setTicksByTask(map);
+      } catch (e) {
+        if (!alive) return;
+        setError(e?.message || String(e));
+      } finally {
+        if (!alive) return;
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [projectId, startYmd, endYmd, taskIdsKey]);
+
+  async function toggleTick(taskId, day) {
+    const tid = String(taskId || "");
+    if (!projectId || !tid || !day) return;
+
+    setError("");
+
+    // optimistic update
+    const cur = Number(ticksByTask?.[tid]?.[day] || 0);
+    const nxt = cur === 0 ? 1 : cur === 1 ? 2 : 0;
+
+    setTicksByTask((prev) => {
+      const next = { ...(prev || {}) };
+      const row = { ...(next[tid] || {}) };
+      row[day] = nxt;
+      next[tid] = row;
       return next;
     });
+
+    try {
+      await upsertProjectTickCell({
+        project_id: projectId,
+        task_id: tid,
+        tick_date: day,
+        state: nxt,
+      });
+    } catch (e) {
+      // revert on failure
+      setTicksByTask((prev) => {
+        const next = { ...(prev || {}) };
+        const row = { ...(next[tid] || {}) };
+        row[day] = cur;
+        next[tid] = row;
+        return next;
+      });
+      setError(e?.message || String(e));
+      alert(e?.message || String(e));
+    }
   }
 
-  function addExtraDay() {
+  async function addExtraDay() {
     if (!canAdd) return;
-    setStore((prev) => {
-      const next = { ...prev };
-      const p = next[project.id] ? { ...next[project.id] } : { extraDays: 0, ticks: {} };
-      p.extraDays = Math.min((p.extraDays || 0) + 1, tailDays.length);
-      next[project.id] = p;
-      return next;
-    });
+    if (!projectId) return;
+
+    const nextExtra = Math.min(safeExtraDays + 1, tailDays.length);
+
+    // optimistic
+    setExtraDays(nextExtra);
+    setError("");
+
+    try {
+      await setProjectTickExtraDays(projectId, nextExtra);
+    } catch (e) {
+      setExtraDays(safeExtraDays);
+      setError(e?.message || String(e));
+      alert(e?.message || String(e));
+    }
   }
 
   return (
@@ -164,15 +253,15 @@ function ProjectTickTable({ project, tasks, updateTask }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div style={{ fontSize: 12, opacity: 0.75 }}>
           timeline: <b>{fmtDM(startYmd)}</b> → <b>{fmtDM(eventYmd)}</b>
+          {loading ? <span style={{ marginLeft: 8, opacity: 0.7 }}>· loading…</span> : null}
+          {error ? <span style={{ marginLeft: 8, color: "#ffb4b4" }}>· {error}</span> : null}
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           <button onClick={addExtraDay} disabled={!canAdd} style={{ ...btnSm, opacity: canAdd ? 1 : 0.5 }}>
             +
           </button>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>
-            * หลัง event date กด “+” เพื่อเพิ่มวันเผื่อเลื่อนแผน
-          </div>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>* หลัง event date กด “+” เพื่อเพิ่มวันเผื่อเลื่อนแผน</div>
         </div>
       </div>
 
@@ -228,7 +317,7 @@ function ProjectTickTable({ project, tasks, updateTask }) {
                 </td>
 
                 {shownDays.map((d) => {
-                  const value = Number(state.ticks?.[t.id]?.[d] || 0);
+                  const value = Number(ticksByTask?.[t.id]?.[d] || 0);
                   return (
                     <td key={d} style={{ ...td, textAlign: "center" }}>
                       <TickButton value={value} onClick={() => toggleTick(t.id, d)} />
@@ -255,19 +344,11 @@ function ProjectTickTable({ project, tasks, updateTask }) {
 }
 
 function ProjectInstance({ project, tasks, updateTask }) {
-  // owner doer/support should come from Create Project defaults; fallback to first task if project object doesn't store them
-    // owner doer/support should come from Create Project (Template) ONLY (doer_default/support_default)
-    // owner doer/support should come from Create Project (Template) ONLY (doer_default/support_default)
-  // If TaskStore doesn't persist these fields, we read from localStorage snapshot saved at creation time.
-  const ownersStore = useMemo(() => parseJSON(LS_PROJECT_OWNERS, {}), []);
-  const ownersSnap = ownersStore?.[project.id] || {};
-
   const ownerDoer =
     project.doer_default ||
     project.doerDefault ||
     project.doer ||
     project.owner_doer ||
-    ownersSnap.doer ||
     "";
 
   const ownerSupport =
@@ -275,7 +356,6 @@ function ProjectInstance({ project, tasks, updateTask }) {
     project.supportDefault ||
     project.support ||
     project.owner_support ||
-    ownersSnap.support ||
     "";
 
   return (
@@ -296,14 +376,11 @@ function ProjectInstance({ project, tasks, updateTask }) {
   );
 }
 
-
 export default function ProjectsPage() {
   const { projects, tasks, createProject, updateTask } = useTasks();
-// --- Patch (เฉพาะประเด็น: ให้ Task ที่สร้างจาก Projectboard มีชื่อโปรเจกต์ instance เช่น D-Camp14) ---
-// แนวทาง: backfill field `project_name` ให้ tasks ที่มี project_id ตรงกับ project.id
-// เพื่อให้ TaskBoard แสดงชื่อโปรเจกต์ได้ (ไม่แตะ UI/logic อื่น)
-const _normalizePid = (v) => (v == null ? "" : String(v));
 
+  // --- Patch (เฉพาะประเด็น: ให้ Task ที่สร้างจาก Projectboard มีชื่อโปรเจกต์ instance เช่น D-Camp14) ---
+  const _normalizePid = (v) => (v == null ? "" : String(v));
 
   const [form, setForm] = useState({
     kind: "DC",
@@ -315,45 +392,38 @@ const _normalizePid = (v) => (v == null ? "" : String(v));
     start_date: "",
     event_date: "",
   });
-// ✅ Backfill project_name ให้ tasks ของทุกโปรเจกต์ (รวมของเก่า) เพื่อให้ TaskBoard แสดง "D-Camp14" ได้
-useEffect(() => {
-  if (!Array.isArray(projects) || !Array.isArray(tasks)) return;
-  if (typeof updateTask !== "function") return;
 
-  const projectNameById = new Map();
-  for (const p of projects) {
-    const pid = _normalizePid(p?.id || p?.project_id || p?.projectId || p?.projectID);
-    if (!pid) continue;
-    const pname = p?.name || p?.project_name || p?.title || p?.projectTitle || "";
-    if (!pname) continue;
-    projectNameById.set(pid, pname);
-  }
+  // ✅ Backfill project_name ให้ tasks ของทุกโปรเจกต์ (รวมของเก่า)
+  useEffect(() => {
+    if (!Array.isArray(projects) || !Array.isArray(tasks)) return;
+    if (typeof updateTask !== "function") return;
 
-  // อัปเดตเฉพาะ task ที่ยังไม่มี project_name (หรือไม่ตรง) เพื่อไม่ให้ loop
-  for (const t of tasks) {
-    const pid = _normalizePid(t?.project_id || t?.projectId || t?.projectID);
-    if (!pid) continue;
+    const projectNameById = new Map();
+    for (const p of projects) {
+      const pid = _normalizePid(p?.id || p?.project_id || p?.projectId || p?.projectID);
+      if (!pid) continue;
+      const pname = p?.name || p?.project_name || p?.title || p?.projectTitle || "";
+      if (!pname) continue;
+      projectNameById.set(pid, pname);
+    }
 
-    const pname = projectNameById.get(pid);
-    if (!pname) continue;
+    for (const t of tasks) {
+      const pid = _normalizePid(t?.project_id || t?.projectId || t?.projectID);
+      if (!pid) continue;
 
-    const cur = t?.project_name || t?.projectName || t?.projectTitle || "";
-    if (cur === pname) continue;
+      const pname = projectNameById.get(pid);
+      if (!pname) continue;
 
-    // ปลอดภัย: update เฉพาะ field เพิ่มเติมที่จำเป็นสำหรับการแสดงผลชื่อโปรเจกต์
-    updateTask?.(t.id, { project_name: pname });
-  }
-}, [projects, tasks, updateTask]);
+      const cur = t?.project_name || t?.projectName || t?.projectTitle || "";
+      if (cur === pname) continue;
 
+      updateTask?.(t.id, { project_name: pname });
+    }
+  }, [projects, tasks, updateTask]);
 
   function onCreate() {
     if (!form.name.trim()) return alert("ใส่ชื่อโปรเจกต์ก่อน");
     if (!form.start_date) return alert("ใส่ start date");
-    // ✅ DC ก็เลือก event date ได้, ถ้าไม่ใส่จะ default = start_date
-    if ((form.kind === "DCP" || form.kind === "DC") && !form.event_date) {
-      // ไม่บังคับ แต่ช่วยให้ชัด
-      // (ถ้าอยากบังคับก็เปลี่ยนเป็น return alert)
-    }
 
     const pid = createProject({
       project_kind: form.kind,
@@ -366,23 +436,17 @@ useEffect(() => {
       event_date: form.event_date || form.start_date,
     });
 
-    // ✅ persist project owners from Create Project form (so header always shows form values)
-    const ownersStore = parseJSON(LS_PROJECT_OWNERS, {});
-    ownersStore[pid] = { doer: form.doer_default || "", support: form.support_default || "" };
-    
-// ✅ พยายาม backfill project_name ให้ tasks ของโปรเจกต์ที่เพิ่งสร้าง (เผื่อ createProject สร้าง tasks แบบ sync)
-// ถ้ายังไม่มีก็ไม่เป็นไร เพราะ useEffect ข้างบนจะ backfill ให้อัตโนมัติเมื่อ tasks ถูกเพิ่มเข้ามา
-try {
-  const pname = form.name.trim();
-  for (const t of tasks || []) {
-    const pidRaw = t.project_id || t.projectId || t.projectID;
-    if (String(pidRaw) !== String(pid)) continue;
-    const cur = t.project_name || t.projectName || t.projectTitle || "";
-    if (cur === pname) continue;
-    updateTask?.(t.id, { project_name: pname });
-  }
-} catch {}
-setJSON(LS_PROJECT_OWNERS, ownersStore);
+    // best-effort backfill project_name ให้ tasks ที่เพิ่งสร้าง
+    try {
+      const pname = form.name.trim();
+      for (const t of tasks || []) {
+        const pidRaw = t.project_id || t.projectId || t.projectID;
+        if (String(pidRaw) !== String(pid)) continue;
+        const cur = t.project_name || t.projectName || t.projectTitle || "";
+        if (cur === pname) continue;
+        updateTask?.(t.id, { project_name: pname });
+      }
+    } catch {}
 
     alert(`สร้างโปรเจกต์สำเร็จ ✅\nproject_id: ${pid}`);
   }
@@ -392,7 +456,6 @@ setJSON(LS_PROJECT_OWNERS, ownersStore);
   }, [projects]);
 
   const tasksByProject = useMemo(() => {
-    // ✅ Group tasks by project_id (string-normalized) so Projectboard can always find them
     const map = new Map();
 
     for (const t of tasks) {
@@ -404,7 +467,6 @@ setJSON(LS_PROJECT_OWNERS, ownersStore);
       map.get(pid).push(t);
     }
 
-    // Sort: deadline ก่อน (ถ้ามี) ไม่งั้นเรียงตาม created_at
     for (const [pid, arr] of map.entries()) {
       arr.sort((a, b) => {
         const ad = a.deadline || a.due_date || a.dueDate;
@@ -430,7 +492,6 @@ setJSON(LS_PROJECT_OWNERS, ownersStore);
         แสดงเฉพาะโปรเจกต์ที่ kind = DC/DCP และแสดง tickbox รายวัน (เพิ่มวันได้ด้วยปุ่ม + หลัง event date)
       </p>
 
-      {/* Create Project */}
       <div style={{ border: "1px solid #2b2b2b", borderRadius: 12, padding: 12, background: "#141a1f" }}>
         <strong>Create Project (Template)</strong>
 
@@ -469,13 +530,10 @@ setJSON(LS_PROJECT_OWNERS, ownersStore);
             </select>
           </Field>
 
-          {/* ✅ doer/support เป็น owner หลักของโปรเจกต์ */}
           <Field label="doer default">
             <select value={form.doer_default} onChange={(e) => setForm({ ...form, doer_default: e.target.value })} style={inp}>
               {PEOPLE.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
+                <option key={p} value={p}>{p}</option>
               ))}
             </select>
           </Field>
@@ -484,9 +542,7 @@ setJSON(LS_PROJECT_OWNERS, ownersStore);
             <select value={form.support_default} onChange={(e) => setForm({ ...form, support_default: e.target.value })} style={inp}>
               <option value="-">-</option>
               {PEOPLE.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
+                <option key={p} value={p}>{p}</option>
               ))}
             </select>
           </Field>
@@ -495,26 +551,17 @@ setJSON(LS_PROJECT_OWNERS, ownersStore);
             <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} style={inp} />
           </Field>
 
-          {/* ✅ DC ก็เลือก event date ได้ */}
           <Field label={`event date (${form.kind})`}>
-            <input
-              type="date"
-              value={form.event_date}
-              onChange={(e) => setForm({ ...form, event_date: e.target.value })}
-              style={inp}
-            />
+            <input type="date" value={form.event_date} onChange={(e) => setForm({ ...form, event_date: e.target.value })} style={inp} />
           </Field>
         </div>
 
         <div style={{ marginTop: 10 }}>
-          <button onClick={onCreate} style={btn}>
-            Create project
-          </button>
+          <button onClick={onCreate} style={btn}>Create project</button>
           <span style={{ marginLeft: 10, fontSize: 12, opacity: 0.7 }}>* กดแล้วระบบจะสร้าง workflow tasks อัตโนมัติ</span>
         </div>
       </div>
 
-      {/* Projects */}
       <div style={{ marginTop: 14 }}>
         {visibleProjects.length === 0 && <div style={{ opacity: 0.7, marginTop: 14 }}>ยังไม่มีโปรเจกต์ DC/DCP</div>}
 

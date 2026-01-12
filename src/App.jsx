@@ -5,10 +5,13 @@ import TasksPage from "./pages/TasksPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import WorklogPage from "./pages/WorklogPage";
 import LoginPage from "./pages/LoginPage";
+import ResetPassword from "./pages/ResetPassword";
 
 import RequireAuth from "./auth/RequireAuth";
+import RequireSupervisor from "./auth/RequireSupervisor";
+
 import { TaskProvider } from "./TaskStore";
-import ResetPassword from "./pages/ResetPassword";
+import ActionLogsPage from "./pages/ActionLogsPage";
 
 function App() {
   return (
@@ -29,6 +32,16 @@ function App() {
                   <Route path="/tasks" element={<TasksPage />} />
                   <Route path="/projects" element={<ProjectsPage />} />
                   <Route path="/worklog" element={<WorklogPage />} />
+
+                  {/* Supervisor only */}
+                  <Route
+                    path="/logs"
+                    element={
+                      <RequireSupervisor>
+                        <ActionLogsPage />
+                      </RequireSupervisor>
+                    }
+                  />
                 </Routes>
               </RequireAuth>
             }
