@@ -68,7 +68,10 @@ function getProjectEnd(project, tasks) {
 }
 
 function normalizeProjectId(project) {
-  return project?.id || project?.project_id || project?.projectId || project?.projectID || "";
+  // สำคัญ: tick cells ใน Supabase อ้าง FK ไปที่ projects.project_id
+  // ในบางเคส project.id เป็น local id (ฝั่ง store) ที่ไม่มีใน DB → จะทำให้ FK fail
+  // ดังนั้นให้ prefer project_id ก่อนเสมอ
+  return project?.project_id || project?.projectId || project?.projectID || project?.id || "";
 }
 
 function Field({ label, children }) {
