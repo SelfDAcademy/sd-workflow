@@ -21,8 +21,14 @@ function assertSupabaseReady() {
 function defaultUsernameFromEmail(email) {
   if (!email || typeof email !== "string") return "user";
   const local = email.split("@")[0] || "user";
+
   // ให้เป็น slug แบบเบา ๆ (กันช่องว่าง/ตัวอักษรแปลก)
-  return local.trim().toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_-.]/g, "");
+  // ✅ FIX: ย้าย "-" ไปท้ายสุดของ character class เพื่อไม่ให้เกิด Range out of order
+  return local
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_.-]/g, "");
 }
 
 async function getAuthUserOrThrow() {
